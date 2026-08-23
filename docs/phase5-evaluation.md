@@ -1,4 +1,4 @@
-# 第五阶段：LangSmith 评测
+﻿# 第五阶段：LangSmith 评测
 
 ## 1. 这一阶段解决什么问题
 
@@ -39,6 +39,22 @@ python -m evaluations.run_evaluation --upload              # 需要有效 LANGSM
 3. **有界错误反馈重试**：首次失败把真实错误回传模型再试一次（官方推荐模式），仅一层、不嵌套。
 4. **formatter 加固**：evidence_ids 保序去重；high/critical 风险强制 requires_human_review=True（朝更严格方向）。
 5. PLAN_PROMPT 增补四类高频失败场景的显式范围规则（设备档案/手册检索属 in_scope、模糊时间窗必须追问、多工具请求必须完整列举）。
+
+
+6. **DeepSeek provider 接入修复（2026-08-24）**：deepseek-v4 默认思考模式拒绝强制 tool_choice（HTTP 400），客户端默认携带 `thinking={"type": "disabled"}`；include_raw 失败路径补充 tool_call 实参提取（function_calling 下 content 为空）；formatter 补第三处修正——evidence_sufficient=false 时程序强制 risk_level=unknown（不触发审批）。
+
+## 改进后双模型对比（各一轮全量 live）
+
+| 指标 | qwen2.5:7b (json_schema) | deepseek-v4-flash (function_calling) |
+| --- | --- | --- |
+| tool_selection | 0.95 | **0.98** |
+| trajectory | 0.96 | **0.98** |
+| final_contract | 1.00 | 1.00（零 error） |
+| scope_classification | 0.92 | **0.98** |
+| security | 0.96 | 0.96 |
+| refusal_behavior (strict) | 0.909 | **0.955** |
+
+两模型均达成全部目标指标；DeepSeek 在六项维度全面持平或更优，剩余失分集中在多工具子集偏差与混合注入样本的边界判定。
 
 ## 4. 基线结果与根因分析（50 条 live，qwen2.5:7b）
 

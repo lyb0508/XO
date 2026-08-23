@@ -51,3 +51,25 @@ def test_provider_factories_are_monkeypatched_network_free_and_use_isolated_endp
 def test_cross_provider_methods_and_untrusted_endpoints_are_rejected(kwargs: dict[str, str]) -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **kwargs)
+
+
+@pytest.mark.unit
+def test_deepseek_thinking_disabled_by_default_for_structured_output() -> None:
+    """v4 思考模式拒绝强制 tool_choice：默认必须携带 thinking=disabled。"""
+
+    model = factory.create_chat_model(
+        Settings(_env_file=None, provider="deepseek", model="deepseek-v4-flash",
+                 structured_output_method="function_calling",
+                 deepseek_api_key="placeholder-secret")
+    )
+    assert model.extra_body == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.unit
+def test_deepseek_thinking_can_be_reenabled_explicitly() -> None:
+    model = factory.create_chat_model(
+        Settings(_env_file=None, provider="deepseek", model="deepseek-v4-flash",
+                 structured_output_method="function_calling",
+                 deepseek_api_key="placeholder-secret", deepseek_thinking_disabled=False)
+    )
+    assert not model.extra_body

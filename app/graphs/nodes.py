@@ -173,8 +173,9 @@ def _structured_result_payload(result: Any) -> dict[str, Any]:
     """从 schema-bound 调用的返回值里提取可校验的原始 dict。
 
     include_raw=True 契约：解析成功时 ``parsed`` 是已校验实例；失败时
-    ``parsed`` 为 None、``parsing_error`` 说明原因——此时从 ``raw`` 消息
-    文本里宽松地提取 JSON，交给规范化层修复，而不是直接放弃。
+    ``parsed`` 为 None、``parsing_error`` 说明原因——此时按顺序尝试
+    ``raw`` 消息的 tool_call 参数与文本内容，交给规范化层修复，而不是
+    直接放弃整次诊断。
     """
 
     if isinstance(result, dict) and ("parsed" in result or "parsing_error" in result):
@@ -182,6 +183,17 @@ def _structured_result_payload(result: Any) -> dict[str, Any]:
         if parsed is not None:
             return parsed.model_dump(mode="json") if hasattr(parsed, "model_dump") else dict(parsed)
         raw_message = result.get("raw")
+        # function_calling 路径下模型通过 tool_call 返回参数，此时 content
+        # 往往是空字符串——先取 tool_call 实参再考虑文本。
+        for call in getattr(raw_message, "tool_calls", None) or []:
+            args = call.get("args") if isinstance(call, dict) else None
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(args, dict) and args:
+                return args
         content = getattr(raw_message, "content", raw_message)
         return _extract_json_object(content)
     if isinstance(result, QueryPlan):
@@ -508,6 +520,13 @@ def make_format_report(formatter) -> Any:
             raw["evidence_ids"] = unique_ids
         if raw.get("risk_level") in ("high", "critical"):
             raw["requires_human_review"] = True
+        # 3) 证据不足时不得给出任何风险结论——schema 的交叉约束语义，
+        #    在校验前由程序强制，而不是靠模型记得。
+        # 3) 证据不足时不得给出任何风险结论——schema 的交叉约束语义，
+        #    在校验前由程序强制，而不是靠模型记得。注意这不触发人工审批：
+        #    无结论的拒答类报告没有可批准的动作。
+        if raw.get("evidence_sufficient") is False:
+            raw["risk_level"] = "unknown"
         draft = DiagnosisDraft.model_validate(raw)
         if draft.request_id != state["request_id"] or draft.device_id != state["device_id"]:
             raise RuntimeError("structured diagnostic response did not preserve request identity")

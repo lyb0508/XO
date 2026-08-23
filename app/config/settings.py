@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     deepseek_max_retries: int = Field(default=2, ge=0, le=10)
+    # deepseek-v4 默认思考模式拒绝强制 tool_choice（结构化输出必需），默认关闭。
+    deepseek_thinking_disabled: bool = True
     structured_output_method: Literal["json_schema", "function_calling"] = "json_schema"
 
     # 证据采集最多串联五个业务工具外加一小段收尾回合；报告排版另有固定的一次

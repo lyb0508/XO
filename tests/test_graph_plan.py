@@ -314,3 +314,21 @@ def test_plan_recovers_when_structured_parsing_reports_error() -> None:
     # 规范化层清掉了追问类计划携带的证据类型，无需重试即可通过校验。
     assert plan["requested_evidence_types"] == []
     assert len(planner.calls) == 1
+
+
+@pytest.mark.unit
+def test_structured_payload_extracts_from_tool_call_args_when_content_empty() -> None:
+    """function_calling 失败路径：参数在 tool_call 里而 content 为空。"""
+
+    from app.graphs.nodes import _structured_result_payload
+
+    broken = {"scope_status": "needs_clarification", "reason": "r",
+              "requested_evidence_types": ["sensor"], "device_id": "PUMP-003"}
+    result = {
+        "parsed": None,
+        "parsing_error": "needs_clarification plan must not request evidence types",
+        "raw": type("Msg", (), {"content": "", "tool_calls": [{"name": "QueryPlan", "args": broken}]})(),
+    }
+    payload = _structured_result_payload(result)
+    assert payload["scope_status"] == "needs_clarification"
+    assert payload["requested_evidence_types"] == ["sensor"]

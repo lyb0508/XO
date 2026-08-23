@@ -43,6 +43,10 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
             or not settings.deepseek_api_key.get_secret_value().strip()
         ):
             raise ValueError("INDUSTRIAL_AGENT_DEEPSEEK_API_KEY is required when provider=deepseek")
+        # deepseek-v4 系列默认开启思考模式，该模式拒绝强制 tool_choice
+        # （HTTP 400 "Thinking mode does not support this tool_choice"），
+        # 而 function_calling 结构化输出依赖它。默认显式关闭思考：
+        # 兼容性必需，且实测更快、更省 token。
         return ChatDeepSeek(
             model=settings.model,
             api_base=str(settings.deepseek_base_url),
@@ -50,6 +54,11 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
             temperature=settings.temperature,
             timeout=settings.timeout_seconds,
             max_retries=settings.deepseek_max_retries,
+            **(
+                {}
+                if not getattr(settings, "deepseek_thinking_disabled", False)
+                else {"extra_body": {"thinking": {"type": "disabled"}}}
+            ),
         )
 
     raise ValueError(f"Unsupported model provider: {settings.provider}")
