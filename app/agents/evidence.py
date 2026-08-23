@@ -300,6 +300,52 @@ _BUILDERS = {
 }
 
 
+def entries_from_tool_payload(
+    tool_name: str,
+    payload: Mapping[str, Any],
+    requested_device_id: str,
+) -> list[RegistryEntry]:
+    """Convert one successful tool payload into canonical registry entries.
+
+    This is the shared conversion boundary for both the message-driven phase-one
+    flow and the graph-driven phase-two flow. A ``not_found`` payload is a
+    completed call that intentionally contributes no evidence.
+    """
+
+    payload = _mapping(payload, f"{tool_name}.payload")
+    builder = _BUILDERS.get(tool_name)
+    if builder is None:
+        _fail(f"unsupported successful tool {tool_name!r}")
+    status = payload.get("status")
+    if status not in {"ok", "not_found"}:
+        _fail(f"{tool_name}.payload.status must be 'ok' or 'not_found'")
+    if status == "not_found":
+        return []
+    return builder(payload, tool_name, requested_device_id)
+
+
+def serialize_entry(entry: RegistryEntry) -> dict[str, Any]:
+    """Return a JSON-safe snapshot so graph state stays serializable."""
+
+    return {
+        "evidence": entry.evidence.model_dump(mode="json"),
+        "device_id": entry.device_id,
+        "tool_name": entry.tool_name,
+        "facts": _json_safe(dict(entry.facts)),
+    }
+
+
+def deserialize_entry(data: Mapping[str, Any]) -> RegistryEntry:
+    """Rebuild an immutable entry from its serialized snapshot."""
+
+    return RegistryEntry(
+        evidence=EvidenceItem.model_validate(data["evidence"]),
+        device_id=_text(data.get("device_id"), "registry.device_id"),
+        tool_name=_text(data.get("tool_name"), "registry.tool_name"),
+        facts=MappingProxyType(dict(data["facts"])),
+    )
+
+
 def build_evidence_registry(messages: list[Any], requested_device_id: str) -> EvidenceRegistry:
     """Create canonical evidence and preserve tool failures until a valid retry clears them."""
 
@@ -322,19 +368,9 @@ def build_evidence_registry(messages: list[Any], requested_device_id: str) -> Ev
             payload = message.content
         else:
             _fail(f"{message.name}.content must be a JSON object")
-        payload = _mapping(payload, f"{message.name}.payload")
-        builder = _BUILDERS.get(message.name)
-        if builder is None:
-            _fail(f"unsupported successful tool {message.name!r}")
-        status = payload.get("status")
-        if status not in {"ok", "not_found"}:
-            _fail(f"{message.name}.payload.status must be 'ok' or 'not_found'")
-        # A not_found response is a completed call but intentionally contributes
-        # no evidence. Only this exact tool may resolve its earlier error.
+        batch = entries_from_tool_payload(message.name, payload, requested_device_id)
         unresolved_tool_errors.discard(message.name)
-        if status == "not_found":
-            continue
-        for entry in builder(payload, message.name, requested_device_id):
+        for entry in batch:
             previous = entries.get(entry.evidence.evidence_id)
             if previous is not None and previous != entry:
                 _fail(f"conflicting stable evidence_id {entry.evidence.evidence_id!r}")

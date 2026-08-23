@@ -12,6 +12,7 @@ from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitM
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
+from pydantic import ValidationError
 
 from app.agents.evidence import EvidenceRegistry, build_evidence_registry
 from app.schemas.diagnostics import DiagnosisDraft, DiagnosisReport
@@ -120,7 +121,61 @@ def build_diagnostic_agent(
     )
 
 
-def _validate_vibration_gate(draft: DiagnosisDraft, registry: EvidenceRegistry) -> None:
+def _vibration_entry_ids(registry: EvidenceRegistry) -> set[str]:
+    return {
+        entry.evidence.evidence_id
+        for entry in registry.entries.values()
+        if entry.evidence.evidence_type == "sensor" and entry.facts.get("metric") == "vibration_mm_s"
+    }
+
+
+def _threshold_entry_ids(registry: EvidenceRegistry) -> tuple[set[str], set[float]]:
+    entries = [
+        entry
+        for entry in registry.entries.values()
+        if entry.evidence.evidence_type == "device"
+        and "vibration_alarm_threshold_mm_s" in entry.facts
+    ]
+    ids = {entry.evidence.evidence_id for entry in entries}
+    values = {float(entry.facts["vibration_alarm_threshold_mm_s"]) for entry in entries}
+    return ids, values
+
+
+def repair_vibration_selection(draft: DiagnosisDraft, registry: EvidenceRegistry) -> DiagnosisDraft:
+    """Complete incomplete model references with program-collected facts only.
+
+    Small local models sometimes forget to reference the device threshold or a
+    returned vibration point even though the graph already fetched them. The
+    repair only ever adds canonical registry entries; it never invents facts.
+    Contradictory thresholds are not auto-selected so the downstream gate still
+    fails closed.
+    """
+
+    if not draft.evidence_sufficient:
+        return draft
+    vibration_ids = _vibration_entry_ids(registry)
+    if not vibration_ids or not (set(draft.evidence_ids) & vibration_ids):
+        return draft
+    repaired = set(draft.evidence_ids) | vibration_ids
+    threshold_ids, threshold_values = _threshold_entry_ids(registry)
+    if len(threshold_values) == 1:
+        repaired |= threshold_ids
+    ordered = [evidence_id for evidence_id in draft.evidence_ids if evidence_id in repaired]
+    ordered += sorted(repaired - set(ordered))
+    if ordered == list(draft.evidence_ids):
+        return draft
+    payload = draft.model_dump(mode="python")
+    payload["evidence_ids"] = ordered
+    try:
+        return DiagnosisDraft.model_validate(payload)
+    except ValidationError:
+        # An over-full or otherwise invalid repair must not crash the graph.
+        # Falling back keeps the original draft, and the vibration gate then
+        # rejects it through its explicit failure paths instead.
+        return draft
+
+
+def validate_vibration_gate(draft: DiagnosisDraft, registry: EvidenceRegistry) -> None:
     """Enforce threshold evidence completeness without interpreting model prose."""
 
     if not draft.evidence_sufficient:
@@ -133,40 +188,41 @@ def _validate_vibration_gate(draft: DiagnosisDraft, registry: EvidenceRegistry) 
     }
     if not selected_vibration_ids:
         return
+    all_vibration_ids = _vibration_entry_ids(registry)
+    if selected_vibration_ids != all_vibration_ids:
+        raise RuntimeError("vibration diagnosis must select every returned vibration evidence point")
+    threshold_ids, threshold_values = _threshold_entry_ids(registry)
+    selected_threshold_ids = threshold_ids & set(draft.evidence_ids)
+    if not selected_threshold_ids:
+        raise RuntimeError("vibration diagnosis requires selected device threshold evidence")
+    if len(threshold_values) != 1:
+        raise RuntimeError("vibration diagnosis has contradictory device thresholds")
     all_vibration_entries = [
         entry
         for entry in registry.entries.values()
-        if entry.evidence.evidence_type == "sensor" and entry.facts.get("metric") == "vibration_mm_s"
+        if entry.evidence.evidence_id in all_vibration_ids
     ]
-    all_vibration_ids = {entry.evidence.evidence_id for entry in all_vibration_entries}
-    if selected_vibration_ids != all_vibration_ids:
-        raise RuntimeError("vibration diagnosis must select every returned vibration evidence point")
-    selected_threshold_entries = [
-        entry
-        for entry in selected_entries
-        if entry.evidence.evidence_type == "device"
-        and "vibration_alarm_threshold_mm_s" in entry.facts
-    ]
-    if not selected_threshold_entries:
-        raise RuntimeError("vibration diagnosis requires selected device threshold evidence")
-    thresholds = {float(entry.facts["vibration_alarm_threshold_mm_s"]) for entry in selected_threshold_entries}
-    if len(thresholds) != 1:
-        raise RuntimeError("vibration diagnosis has contradictory device thresholds")
     values = [float(entry.facts["value"]) for entry in all_vibration_entries]
     if not values:
         raise RuntimeError("vibration diagnosis has no numeric points")
-    if max(values) > thresholds.pop() and draft.risk_level == "low":
+    if max(values) > threshold_values.pop() and draft.risk_level == "low":
         raise RuntimeError("risk_level=low conflicts with selected vibration evidence above its threshold")
 
 
-def _finalize_report(draft: DiagnosisDraft, registry: EvidenceRegistry) -> DiagnosisReport:
+def finalize_report(draft: DiagnosisDraft, registry: EvidenceRegistry) -> DiagnosisReport:
     """Replace model-selected IDs with program-owned immutable evidence facts."""
 
-    _validate_vibration_gate(draft, registry)
+    draft = repair_vibration_selection(draft, registry)
+    validate_vibration_gate(draft, registry)
     selected = registry.select(draft.evidence_ids)
     final_payload = draft.model_dump(mode="python", exclude={"evidence_ids"})
     final_payload["evidence"] = [entry.evidence.model_dump(mode="python") for entry in selected]
     return DiagnosisReport.model_validate(final_payload)
+
+
+# Phase-one private names kept as aliases so existing callers stay stable.
+_validate_vibration_gate = validate_vibration_gate
+_finalize_report = finalize_report
 
 
 def run_diagnosis(
@@ -227,4 +283,4 @@ def run_diagnosis(
     draft = structured if isinstance(structured, DiagnosisDraft) else DiagnosisDraft.model_validate(structured)
     if draft.request_id != request_id or draft.device_id != device_id:
         raise RuntimeError("structured diagnostic response did not preserve request identity")
-    return _finalize_report(draft, registry)
+    return finalize_report(draft, registry)

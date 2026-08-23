@@ -83,16 +83,27 @@ def test_vibration_gate_selects_all_points_and_threshold_then_generates_canonica
     assert len([item for item in report.evidence if item.evidence_type == "sensor"]) == 3
 
 
-@pytest.mark.parametrize("mutation, expected", [("low", "risk_level=low"), ("missing_threshold", "requires selected device threshold"), ("missing_point", "select every returned vibration")])
-def test_vibration_gate_rejects_low_missing_threshold_or_omitted_point(valid_draft_payload: dict[str, object], utc_window: tuple[datetime, datetime], mutation: str, expected: str) -> None:
+@pytest.mark.parametrize("mutation", ["missing_threshold", "missing_point"])
+def test_vibration_repair_completes_missing_threshold_or_omitted_point(valid_draft_payload: dict[str, object], utc_window: tuple[datetime, datetime], mutation: str) -> None:
     start_at, end_at = utc_window
     draft = copy.deepcopy(valid_draft_payload); ids = _vibration_ids()
-    if mutation == "low": draft["risk_level"] = "low"; draft["requires_human_review"] = False
     if mutation == "missing_threshold": ids.remove("asset:PUMP-003")
     if mutation == "missing_point": ids.pop()
     draft["evidence_ids"] = ids; draft["likely_causes"][0]["evidence_ids"] = ["sensor:PUMP-003:2026-08-22T01:10:00Z"]
     model = ToolCapableFakeChatModel(evidence_responses=_vibration_responses(start_at, end_at), formatter_responses=[draft])
-    with pytest.raises(RuntimeError, match=expected):
+    report = run_diagnosis(build_diagnostic_agent(model), "研判振动", request_id="request-001")
+    selected_types = sorted(item.evidence_type for item in report.evidence)
+    assert selected_types == ["device", "sensor", "sensor", "sensor"]
+    assert any(item.evidence_type == "device" for item in report.evidence)
+
+
+def test_vibration_gate_still_rejects_low_risk_with_above_threshold_evidence(valid_draft_payload: dict[str, object], utc_window: tuple[datetime, datetime]) -> None:
+    start_at, end_at = utc_window
+    draft = copy.deepcopy(valid_draft_payload)
+    draft["risk_level"] = "low"; draft["requires_human_review"] = False
+    draft["evidence_ids"] = _vibration_ids(); draft["likely_causes"][0]["evidence_ids"] = ["sensor:PUMP-003:2026-08-22T01:10:00Z"]
+    model = ToolCapableFakeChatModel(evidence_responses=_vibration_responses(start_at, end_at), formatter_responses=[draft])
+    with pytest.raises(RuntimeError, match="risk_level=low"):
         run_diagnosis(build_diagnostic_agent(model), "研判振动", request_id="request-001")
 
 
@@ -160,3 +171,69 @@ def test_unresolved_natural_language_tool_error_blocks_formatter_with_stable_err
         "evidence collection contains unresolved tool errors; report formatting is blocked",
     ]
     assert model.formatter_call_count == 0
+
+
+def _entry(eid: str, etype: str, facts: dict[str, object]) -> object:
+    from types import MappingProxyType
+
+    from app.agents.evidence import RegistryEntry
+    from app.schemas.diagnostics import EvidenceItem
+
+    return RegistryEntry(
+        evidence=EvidenceItem(evidence_id=eid, evidence_type=etype, source_id=eid, summary="s"),
+        device_id="PUMP-003",
+        tool_name="t",
+        facts=MappingProxyType(dict(facts)),
+    )
+
+
+def test_repair_vibration_selection_is_noop_without_vibration_reference(valid_draft_payload: dict[str, object]) -> None:
+    from types import MappingProxyType
+
+    from app.agents.diagnostic import repair_vibration_selection
+    from app.agents.evidence import EvidenceRegistry
+    from app.schemas.diagnostics import DiagnosisDraft
+
+    draft = DiagnosisDraft.model_validate(valid_draft_payload)
+    entry = _entry(
+        "sensor:PUMP-003:2026-08-22T01:10:00Z",
+        "sensor",
+        {"metric": "temperature_c", "value": 50.0},
+    )
+    registry = EvidenceRegistry(entries=MappingProxyType({entry.evidence.evidence_id: entry}), unresolved_tool_errors=frozenset())
+    # The selected sensor point is a temperature metric, not vibration: no repair may fire.
+    repaired = repair_vibration_selection(draft, registry)
+    assert list(repaired.evidence_ids) == list(draft.evidence_ids)
+
+
+def test_repair_skips_threshold_injection_when_registry_thresholds_conflict() -> None:
+    from types import MappingProxyType
+
+    from app.agents.diagnostic import repair_vibration_selection, validate_vibration_gate
+    from app.agents.evidence import EvidenceRegistry
+    from app.schemas.diagnostics import DiagnosisDraft
+
+    entries = {
+        "sensor-vib": _entry("sensor-vib", "sensor", {"metric": "vibration_mm_s", "value": 8.2}),
+        "device-a": _entry("device-a", "device", {"vibration_alarm_threshold_mm_s": 7.1}),
+        "device-b": _entry("device-b", "device", {"vibration_alarm_threshold_mm_s": 9.9}),
+    }
+    registry = EvidenceRegistry(entries=MappingProxyType(entries), unresolved_tool_errors=frozenset())
+    draft = DiagnosisDraft.model_validate({
+        "request_id": "request-001",
+        "device_id": "PUMP-003",
+        "scope_status": "in_scope",
+        "risk_level": "medium",
+        "summary": "振动超限。",
+        "evidence_sufficient": True,
+        "likely_causes": [{"cause": "轴承异常。", "confidence": 0.5, "evidence_ids": ["sensor-vib"]}],
+        "evidence_ids": ["sensor-vib"],
+        "recommended_actions": [],
+        "requires_human_review": False,
+        "limitations": [],
+    })
+    repaired = repair_vibration_selection(draft, registry)
+    # Conflicting thresholds are never auto-selected; the gate still fails closed.
+    assert "device-a" not in repaired.evidence_ids and "device-b" not in repaired.evidence_ids
+    with pytest.raises(RuntimeError, match="threshold"):
+        validate_vibration_gate(repaired, registry)

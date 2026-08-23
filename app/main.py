@@ -7,12 +7,13 @@ import json
 import sys
 from uuid import uuid4
 
-from app.agents.diagnostic import AgentLimits, build_diagnostic_agent, run_diagnosis
 from app.config.settings import get_settings
+from app.graphs.builder import GRAPH_RECURSION_LIMIT, build_diagnosis_graph
 from app.models.factory import create_chat_model
 from app.observability.tracing import RunContext, TraceMetadata, redact_payload, tracing_run
+from app.schemas.diagnostics import DiagnosisReport
 
-AGENT_VERSION = "phase1"
+AGENT_VERSION = "phase2-graph"
 DEFAULT_DEVICE_ID = "PUMP-003"
 
 
@@ -43,6 +44,8 @@ def _identifier(value: str | None) -> str:
 def main(argv: list[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
+        if not args.question.strip():
+            raise CliUsageError("question must not be empty")
         settings = get_settings()
         context = RunContext(
             request_id=_identifier(args.request_id),
@@ -55,24 +58,29 @@ def main(argv: list[str] | None = None) -> int:
             provider=settings.provider,
             model_alias=settings.model,
         )
-        limits = AgentLimits(
-            model_run_limit=settings.model_run_limit,
-            tool_run_limit=settings.tool_run_limit,
-            per_tool_run_limit=settings.per_tool_run_limit,
-        )
         model = create_chat_model(settings)
-        agent = build_diagnostic_agent(
+        graph = build_diagnosis_graph(
             model,
-            limits=limits,
             structured_output_method=settings.structured_output_method,
         )
         with tracing_run(settings, metadata):
-            report = run_diagnosis(
-                agent,
-                args.question,
-                request_id=context.request_id,
-                device_id=args.device_id,
+            result = graph.invoke(
+                {
+                    "request_id": context.request_id,
+                    "device_id": args.device_id,
+                    "question": args.question.strip(),
+                },
+                config={
+                    "run_name": "diagnosis_graph",
+                    "tags": ["diagnosis_graph"],
+                    "recursion_limit": GRAPH_RECURSION_LIMIT,
+                },
             )
+        if result.get("error") or not result.get("report"):
+            safe_message = redact_payload(str(result.get("error", "diagnosis produced no report")))
+            print(json.dumps({"error": safe_message}, ensure_ascii=False), file=sys.stderr)
+            return 1
+        report = DiagnosisReport.model_validate(result["report"])
         safe_report = redact_payload(report.model_dump(mode="json"))
         print(json.dumps(safe_report, ensure_ascii=False))
         return 0
