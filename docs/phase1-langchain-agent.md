@@ -76,15 +76,17 @@ Trace 只能说明执行路径和调用观察结果，不能证明诊断正确�
 
 ## 6. 验证证据与边界
 
-已有验证记录（不是本次文档任务重新运行的结果）：
+以下为 2026-08-23 在本仓库重新执行的验证结果：
 
 - Python `3.13.12`。
 - `pip install -e .`、`pip check`、`python -m compileall app tests` 成功。
-- 离线 fake model 测试共 47 项，连续三次通过，耗时 `2.87s / 2.89s / 2.95s`。
+- 默认离线套件共 100 项收集：98 项 fake model/契约测试通过；2 项 live provider 测试按设计默认跳过。连续三次运行全部稳定，稳态耗时约 `2.23s / 2.37s`。
 - 未运行 live Ollama、live DeepSeek、付费 API 或远端 LangSmith Trace。
 - `pylock.toml` 由 `pip lock` 生成；`pip lock` 在当前工具链中仍标记为 experimental，锁文件不是部署证明。
 
-本次交付只修改文档，因此无适用的运行测试；本次替代验证是相对链接、结构、敏感词和 `git diff --check` 检查。模型实际工具选择质量仍没有 live 证据，不能宣称达到生产准确率。
+模型实际工具选择质量仍没有 live 证据，不能宣称达到生产准确率。
+
+本次交付修改了治理文件与文档并清理了生成缓存，除上述测试外无其他适用运行测试。
 
 ## 7. 失败复盘
 
@@ -95,6 +97,10 @@ Trace 只能说明执行路径和调用观察结果，不能证明诊断正确�
 ### 7.2 `datetime` 的 Python repr 造成来源误拒绝
 
 独立测试发现工具结果中的 `datetime` 可能以 Python repr 进入 `ToolMessage`；随后 JSON 解码失败，程序无法从成功工具结果收集 source，于是合法报告被误判为无授权来源。修复点在工具边界：只接受有时区时间，并递归转换为 ISO 8601 JSON-safe 值。修复后来源检查仍只信 `status=ok` 的实际工具 payload。
+
+### 7.3 复制项目目录后测试报告路径指向旧位置
+
+本项目从旧工作目录整体复制而来，`__pycache__` 一并带入。Python 加载 `.pyc` 时只校验 magic、源文件 mtime 和 size；内容未变时旧缓存一直有效，而字节码内嵌的 `co_filename` 仍指向旧目录。pytest 对运行中 `pytest.skip()` 的报告位置读取崩溃帧的 `co_filename`，于是 skip 摘要显示为不存在的 `..\langchain\tests\...` 路径。收集 nodeid 不依赖 `co_filename`，因此只有摘要异常、套件本身全绿，容易误判为 pytest rootdir 推断问题。定位方法是用一个临时 terminal-summary 插件打印 skipped 报告的原始 `longrepr[0]`，再与磁盘真实路径对比。修复是删除全部 `__pycache__` 与 `.pytest_cache` 让本地重新编译；两者都是忽略规则内的生成物。迁移或复制项目后清理字节码缓存即可避免。
 
 ## 8. 成功、失败和安全路径
 

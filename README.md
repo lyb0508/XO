@@ -57,4 +57,4 @@ python -m pytest
 - `tests/`：离线 fake model、契约、限额、来源闭环和脱敏测试。
 - [`docs/phase1-langchain-agent.md`](docs/phase1-langchain-agent.md)：阶段学习材料、真实数据流、失败复盘和练习。
 
-既有验证记录包括 Python 3.13.12、锁定依赖、editable 安装、`pip check`、`compileall`，以及离线 47 项测试连续三次通过（2.87/2.89/2.95 秒）；完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。
+2026-08-23 验证记录包括 Python 3.13.12、`pip check`、`compileall app tests`，以及离线 98 项测试（另有 2 项 live 测试默认跳过）连续三次通过，稳态耗时约 `2.2s / 2.4s`；完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。
