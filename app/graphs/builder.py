@@ -163,5 +163,10 @@ def _tool_name_for(node_name: str) -> str:
 
 
 def _schema_bound(model: BaseChatModel, schema: type, method: str) -> Invokable:
-    """把裸模型包装成"必须产出符合 Schema 的结构化对象"的可调用体。"""
-    return model.with_structured_output(schema, method=method, include_raw=False)  # type: ignore[arg-type]
+    """把裸模型包装成"产出符合 Schema 的结构化结果"的可调用体。
+
+    include_raw=True 让解析失败不再以异常形式逃逸：调用方拿到
+    ``{"raw": 原始消息, "parsed": 校验实例或 None, "parsing_error": 说明}``，
+    由节点层的规范化与重试逻辑接管修复，而不是直接输掉整次诊断。
+    """
+    return model.with_structured_output(schema, method=method, include_raw=True)  # type: ignore[arg-type]

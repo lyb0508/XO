@@ -1,4 +1,4 @@
-"""Frozen contract tests for the phase-two QueryPlan schema."""
+﻿"""Frozen contract tests for the phase-two QueryPlan schema."""
 
 from __future__ import annotations
 
@@ -106,3 +106,211 @@ def test_out_of_scope_plan_with_reason_only_is_valid() -> None:
         {"scope_status": "out_of_scope", "reason": "与设备诊断无关", "requested_evidence_types": []}
     )
     assert plan.device_id is None and plan.requested_evidence_types == []
+
+
+class _ScriptedPlanner:
+    """按脚本回放的假规划器：异常或 dict 依次弹出，记录每次收到的消息。"""
+
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = list(outcomes)
+        self.calls: list[list[object]] = []
+
+    def invoke(self, messages: object) -> object:
+        self.calls.append(list(messages))  # type: ignore[arg-type]
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+@pytest.mark.unit
+def test_plan_retry_succeeds_after_first_parse_failure() -> None:
+    from app.graphs.nodes import make_plan_queries
+
+    planner = _ScriptedPlanner(
+        [
+            RuntimeError("malformed plan output"),
+            {"scope_status": "in_scope", "reason": "r", "device_id": "OTHER",
+             **UTC_WINDOW, "metrics": ["vibration_mm_s"], "requested_evidence_types": ["sensor"]},
+        ]
+    )
+    node = make_plan_queries(planner)
+    state = {"request_id": "req-1", "device_id": "PUMP-003", "question": "研判振动"}
+    result = node(state)
+    assert len(planner.calls) == 2
+    # 重试消息必须携带第一次的真实错误反馈，而不是盲目重发同一提示。
+    feedback = str(planner.calls[1][-1])
+    assert "could not be used" in feedback and "RuntimeError" in feedback
+    # device_id 被程序覆写为请求中的目标设备。
+    assert result["query_plan"]["device_id"] == "PUMP-003"
+
+
+@pytest.mark.unit
+def test_plan_retry_is_bounded_and_reraises_second_failure() -> None:
+    from app.graphs.nodes import make_plan_queries
+
+    planner = _ScriptedPlanner(
+        [ValueError("bad json one"), ValueError("bad json two")]
+    )
+    node = make_plan_queries(planner)
+    state = {"request_id": "req-1", "device_id": "PUMP-003", "question": "研判振动"}
+    with pytest.raises(ValueError, match="bad json two"):
+        node(state)
+    assert len(planner.calls) == 2  # 只重试一次，不无限放大。
+
+
+@pytest.mark.unit
+def test_plan_happy_path_invokes_planner_exactly_once() -> None:
+    from app.graphs.nodes import make_plan_queries
+
+    planner = _ScriptedPlanner(
+        [{"scope_status": "in_scope", "reason": "r", "device_id": "PUMP-003",
+          **UTC_WINDOW, "metrics": ["vibration_mm_s"], "requested_evidence_types": ["sensor"]}]
+    )
+    node = make_plan_queries(planner)
+    state = {"request_id": "req-1", "device_id": "PUMP-003", "question": "研判振动"}
+    result = node(state)
+    assert len(planner.calls) == 1
+    assert result["query_plan"]["scope_status"] == "in_scope"
+
+
+# ---------- 计划规范化层：程序在校验前执行的确定性修正 ----------
+
+from app.graphs.nodes import _normalize_plan_payload
+
+
+@pytest.mark.unit
+def test_normalize_clears_evidence_fields_for_non_in_scope() -> None:
+    payload = {
+        "scope_status": "needs_clarification",
+        "reason": "时间窗不明确",
+        "requested_evidence_types": ["sensor"],
+        "metrics": ["vibration_mm_s"],
+        "start_at": UTC_WINDOW["start_at"],
+        "end_at": UTC_WINDOW["end_at"],
+        "device_id": "PUMP-003",
+    }
+    out = _normalize_plan_payload(payload)
+    # 追问类计划不消费任何证据字段；清空而非拒绝整个计划。
+    assert out["requested_evidence_types"] == []
+    assert out["metrics"] == []
+    assert out["device_id"] is None
+    assert out["scope_status"] == "needs_clarification"
+
+
+@pytest.mark.unit
+def test_normalize_fills_default_metric_for_sensor_requests() -> None:
+    payload = {
+        "scope_status": "in_scope",
+        "reason": "r",
+        "device_id": "PUMP-003",
+        "requested_evidence_types": ["sensor", "manual"],
+        "manual_query": "vibration",
+        **UTC_WINDOW,
+    }
+    out = _normalize_plan_payload(payload)
+    assert out["metrics"] == ["vibration_mm_s"]
+
+
+@pytest.mark.unit
+def test_normalize_downgrades_in_scope_history_without_window() -> None:
+    payload = {
+        "scope_status": "in_scope",
+        "reason": "研判振动",
+        "device_id": "PUMP-003",
+        "requested_evidence_types": ["sensor"],
+    }
+    out = _normalize_plan_payload(payload)
+    # 程序不能替用户发明时间窗：降级为追问并清空全部证据意图。
+    assert out["scope_status"] == "needs_clarification"
+    assert out["requested_evidence_types"] == []
+    assert out["device_id"] is None
+    assert "time window" in out["reason"]
+
+
+@pytest.mark.unit
+def test_normalize_keeps_in_scope_non_timed_request_untouched() -> None:
+    payload = {
+        "scope_status": "in_scope",
+        "reason": "设备档案查询",
+        "device_id": "PUMP-003",
+        "requested_evidence_types": ["device"],
+    }
+    out = _normalize_plan_payload(payload)
+    # device 类无时间窗依赖，也不需要 metrics：不应被改动。
+    assert out["scope_status"] == "in_scope"
+    assert out["requested_evidence_types"] == ["device"]
+    assert "metrics" not in out or out.get("metrics") in ([], None) or out["metrics"] == []
+
+
+# ---------- formatter 输出的两处程序拥有修正 ----------
+
+def _draft_payload(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "request_id": "req-1",
+        "device_id": "PUMP-003",
+        "scope_status": "in_scope",
+        "risk_level": "low",
+        "summary": "s",
+        "evidence_sufficient": False,
+        "likely_causes": [],
+        "evidence_ids": [],
+        "recommended_actions": [],
+        "requires_human_review": False,
+        "limitations": [],
+    }
+    base.update(overrides)
+    return base
+
+
+class _EchoFormatter:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+        self.calls = 0
+
+    def invoke(self, messages: object) -> dict[str, object]:
+        self.calls += 1
+        return self.payload
+
+
+@pytest.mark.unit
+def test_format_report_dedupes_evidence_ids_and_forces_review_for_high_risk() -> None:
+    from app.graphs.nodes import make_format_report
+
+    payload = _draft_payload(
+        risk_level="high",
+        evidence_sufficient=True,
+        evidence_ids=["evt-1", "evt-2", "evt-1"],
+        requires_human_review=False,
+    )
+    formatter = _EchoFormatter(payload)
+    node = make_format_report(formatter)
+    state = {"request_id": "req-1", "device_id": "PUMP-003", "registry_entries": [], "question": "q"}
+    result = node(state)["draft"]
+    # 重复 ID 被保序去重；high 风险被强制要求人工复核。
+    assert result["evidence_ids"] == ["evt-1", "evt-2"]
+    assert result["requires_human_review"] is True
+
+
+@pytest.mark.unit
+def test_plan_recovers_when_structured_parsing_reports_error() -> None:
+    """include_raw 契约下解析失败不抛异常：规范化层应从 raw 文本救回计划。"""
+
+    from app.graphs.nodes import make_plan_queries
+
+    broken = (
+        '{"scope_status": "needs_clarification", "reason": "时间窗不明确", '
+        '"requested_evidence_types": ["sensor"], "device_id": "PUMP-003"}'
+    )
+    planner = _ScriptedPlanner(
+        [{"raw": type("Msg", (), {"content": broken})(), "parsed": None,
+          "parsing_error": "a needs_clarification plan must not request evidence types"}]
+    )
+    node = make_plan_queries(planner)
+    state = {"request_id": "req-1", "device_id": "PUMP-003", "question": "研判振动"}
+    result = node(state)
+    plan = result["query_plan"]
+    assert plan["scope_status"] == "needs_clarification"
+    # 规范化层清掉了追问类计划携带的证据类型，无需重试即可通过校验。
+    assert plan["requested_evidence_types"] == []
+    assert len(planner.calls) == 1

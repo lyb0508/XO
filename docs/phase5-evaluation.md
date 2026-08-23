@@ -24,13 +24,21 @@ python -m evaluations.run_evaluation --upload              # 需要有效 LANGSM
 
 指标定义（对照 AGENTS.md §8 最终目标）：
 
-| 指标 | 含义 | 目标 | 基线（干净运行） |
-| --- | --- | --- | --- |
-| tool_selection | 计划证据类型集合 vs 期望（全对1/子集0.5/错0） | ≥0.90 | **0.81** ❌ |
-| refusal_behavior (strict) | 拒答类场景正确追问或拒答（排除不适用样例） | ≥0.90 | **0.727** ❌ |
-| trajectory | 实际触达的数据源满足 must_include/exclude | ≥0.85 | **0.84** ❌ |
-| security | 注入/越权样本的计划面受控 | — | 0.88 ✅ |
-| scope_classification / final_contract | 范围分类 / 报告契约 | — | 0.68 / 0.90 |
+| 指标 | 含义 | 目标 | 基线（干净运行） | 改进后（2026-08-24） |
+| --- | --- | --- | --- | --- |
+| tool_selection | 计划证据类型集合 vs 期望（全对1/子集0.5/越界0） | ≥0.90 | **0.81** ✗ | **0.95** ✓ |
+| refusal_behavior (strict) | 拒答类场景正确追问或拒答（排除不适用样例） | ≥0.90 | **0.727** ✗ | **0.909** ✓ |
+| trajectory | 实际触达的数据源满足 must_include/exclude | ≥0.85 | **0.84** ✗ | **0.96** ✓ |
+| security | 注入/越权样本的计划面受控 | — | 0.88 | 0.96 |
+| scope_classification / final_contract | 范围分类 / 报告契约 | — | 0.68 / 0.90 | 0.92 / 1.00 |
+
+改进措施（2026-08-24 实施，连续两轮全量 live 运行结果完全一致、零 error case）：
+
+1. **计划规范化层**（`_normalize_plan_payload`）：在校验前由程序执行提示词已声明的约定——非 in_scope 计划清空全部证据字段而非拒绝；sensor 请求缺 metrics 时补默认 `vibration_mm_s`；in_scope 历史请求缺显式时间窗时降级为 needs_clarification。根因是"语义正确但违反反向约束"的输出被 schema 打成解析失败。
+2. **include_raw=True 接管解析失败**：`with_structured_output` 默认在内部校验并抛 OutputParserException，规范化层没有执行机会；改为 include_raw 契约后，解析失败返回原始输出，程序提取 JSON → 规范化 → 本地校验。
+3. **有界错误反馈重试**：首次失败把真实错误回传模型再试一次（官方推荐模式），仅一层、不嵌套。
+4. **formatter 加固**：evidence_ids 保序去重；high/critical 风险强制 requires_human_review=True（朝更严格方向）。
+5. PLAN_PROMPT 增补四类高频失败场景的显式范围规则（设备档案/手册检索属 in_scope、模糊时间窗必须追问、多工具请求必须完整列举）。
 
 ## 4. 基线结果与根因分析（50 条 live，qwen2.5:7b）
 

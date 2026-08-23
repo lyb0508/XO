@@ -40,7 +40,7 @@ from app.agents.evidence import (
     serialize_entry,
 )
 from app.schemas.diagnostics import DiagnosisDraft
-from app.schemas.query_plan import QueryPlan
+from app.schemas.query_plan import TIMED_EVIDENCE_TYPES, QueryPlan
 from app.tools.industrial import (
     get_device_info,
     query_alarm_history,
@@ -60,7 +60,21 @@ timestamps must be timezone-aware ISO 8601 taken from the question or its contex
 requesting sensor, alarm, or work_order history requires a complete start_at/end_at window;
 include metrics only when requesting sensor evidence (default vibration_mm_s), and manual_query
 only when requesting manual evidence; extra fields for unrequested types are ignored by the program.
-Do not invent measurements, alarms, manuals, or work orders. The plan is not a diagnosis."""
+Do not invent measurements, alarms, manuals, or work orders. The plan is not a diagnosis.
+
+Scope rules learned from recurring failure modes:
+1. Simple factual questions about the device itself (what is it, status, type, location,
+   asset registry, alarm threshold setting) ARE in_scope: request only device evidence.
+   Never send them to needs_clarification and never add other evidence types.
+2. Manual or documentation lookups (procedures, inspection requirements, handling steps,
+   quoted passages) ARE in_scope: request manual evidence with a short keyword manual_query
+   derived from the question. Do not ask the user for clarification when the topic is stated.
+3. If history evidence (sensor, alarm, or work_order) is requested but the time window is
+   relative or vague ("yesterday", "last week", "recently", "some period", "the latest one",
+   "not decided yet") without explicit ISO 8601 timestamps, choose needs_clarification and
+   ask for the concrete start and end times. NEVER invent or assume a window.
+4. When scope_status=in_scope with history evidence, requested_evidence_types must include
+   EVERY category the question explicitly asks about, and no category it does not ask for."""
 
 # 工具名 → 只读工具函数的白名单映射：make_query_node 只会调用这里的函数，
 # 模型无法把执行面扩大到名单之外。
@@ -113,6 +127,88 @@ def _plan_from_state(state: Mapping[str, Any]) -> QueryPlan:
     return QueryPlan.model_validate(raw_plan)
 
 
+def _normalize_plan_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """在校验前对模型输出的原始计划做确定性的程序修正。
+
+    为什么需要这一层：小模型的失败大多是"语义正确但违反反向约束"
+    （例如正确地决定追问却仍带着证据类型）。与其让 schema 把整个计划
+    打成解析失败，不如由程序执行 PLAN_PROMPT 已声明的默认约定——所有
+    修正都朝更保守的方向移动，绝不放宽任何安全边界。
+    """
+
+    cleaned = dict(payload)
+    scope = cleaned.get("scope_status")
+    if scope != "in_scope":
+        # 规则 1：非 in_scope 计划不消费任何证据字段；模型常在"想查但缺
+        # 信息"时仍带上证据类型，清空即可，不必拒绝整个计划。
+        for field in ("requested_evidence_types", "metrics"):
+            cleaned[field] = []
+        for field in ("start_at", "end_at", "manual_query", "device_id"):
+            cleaned[field] = None
+        return cleaned
+
+    types = set(cleaned.get("requested_evidence_types") or [])
+    # 规则 2：sensor 请求缺 metrics 时补上系统默认指标（提示词声明的
+    # vibration_mm_s），把无害遗漏变成可执行计划。
+    if "sensor" in types and not (cleaned.get("metrics") or []):
+        cleaned["metrics"] = ["vibration_mm_s"]
+
+    # 规则 3：in_scope 但历史类证据缺显式时间窗——程序无法替用户发明
+    # 时间，按"证据不足必须追问"语义降级为 needs_clarification。
+    timed = sorted(types & TIMED_EVIDENCE_TYPES)
+    if timed and (not cleaned.get("start_at") or not cleaned.get("end_at")):
+        cleaned["scope_status"] = "needs_clarification"
+        cleaned["reason"] = (
+            f"missing explicit time window for {', '.join(timed)} evidence; "
+            "ask the user for concrete timezone-aware start and end times"
+        )
+        cleaned["requested_evidence_types"] = []
+        cleaned["metrics"] = []
+        for field in ("start_at", "end_at", "manual_query", "device_id"):
+            cleaned[field] = None
+    return cleaned
+
+
+def _structured_result_payload(result: Any) -> dict[str, Any]:
+    """从 schema-bound 调用的返回值里提取可校验的原始 dict。
+
+    include_raw=True 契约：解析成功时 ``parsed`` 是已校验实例；失败时
+    ``parsed`` 为 None、``parsing_error`` 说明原因——此时从 ``raw`` 消息
+    文本里宽松地提取 JSON，交给规范化层修复，而不是直接放弃。
+    """
+
+    if isinstance(result, dict) and ("parsed" in result or "parsing_error" in result):
+        parsed = result.get("parsed")
+        if parsed is not None:
+            return parsed.model_dump(mode="json") if hasattr(parsed, "model_dump") else dict(parsed)
+        raw_message = result.get("raw")
+        content = getattr(raw_message, "content", raw_message)
+        return _extract_json_object(content)
+    if isinstance(result, QueryPlan):
+        return result.model_dump(mode="json")
+    if isinstance(result, dict):
+        return result
+    raise RuntimeError(f"unexpected structured output type: {type(result).__name__}")
+
+
+def _extract_json_object(content: Any) -> dict[str, Any]:
+    """从模型原始文本中提取第一个 JSON 对象；容忍围栏与前后缀文本。"""
+
+    text = content if isinstance(content, str) else "".join(
+        part for part in (getattr(block, "text", "") for block in content)
+    )
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        raise RuntimeError(f"no JSON object found in model output: {text[:200]!r}")
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"model output is not valid JSON: {error}") from error
+    if not isinstance(parsed, dict):
+        raise RuntimeError("model output JSON is not an object")
+    return parsed
+
+
 def make_plan_queries(
     planner,
     *,
@@ -127,19 +223,46 @@ def make_plan_queries(
     "不受信任的参考文本"注入：它能帮助模型理解背景，但永远不能改变
     规则或工具边界。
 
-    失败时：模型输出无法通过校验会上抛异常，本次执行失败；即便模型
-    输出了别的设备号，也会在下方被程序强制覆写为请求中的目标设备。
+    失败时：第一次解析/校验失败会把真实错误回传给模型做一次有界重试；
+    重试仍失败则异常上抛、本次执行失败。即便模型输出了别的设备号，
+    也会在下方被程序强制覆写为请求中的目标设备。
     """
 
-    def plan_queries(state: Mapping[str, Any]) -> dict[str, Any]:
-        structured = planner.invoke(_planner_messages(state, session_memory, ledger))
-        plan = structured if isinstance(structured, QueryPlan) else QueryPlan.model_validate(structured)
+    def _invoke_planner(messages: list[Any], target_state: Mapping[str, Any]) -> dict[str, Any]:
+        result = planner.invoke(messages)
+        raw_payload = _structured_result_payload(result)
+        # 规范化层在 schema 校验之前运行：把"语义正确但违反反向约束"的
+        # 输出修正为合法计划，而不是交给 ValidationError 打成解析失败。
+        normalized = _normalize_plan_payload(raw_payload)
+        plan = QueryPlan.model_validate(normalized)
         payload = plan.model_dump(mode="json")
         # 请求中的 device_id 是权威程序输入：模型输出的设备号在这里被
         # 强制覆写，杜绝模型偷换研判目标。
         if payload["device_id"] is not None:
-            payload["device_id"] = state["device_id"]
+            payload["device_id"] = target_state["device_id"]
         return {"query_plan": payload}
+
+    def plan_queries(state: Mapping[str, Any]) -> dict[str, Any]:
+        messages = _planner_messages(state, session_memory, ledger)
+        try:
+            return _invoke_planner(messages, state)
+        except Exception as first_error:
+            # 有界错误反馈重试（官方推荐模式）：with_structured_output 没有
+            # 内建重试，解析/校验失败会直接上抛。这里把真实错误回传给模型
+            # 再试一次——带错误上下文的重试远优于盲目重发同一提示；只重试
+            # 一次且不再嵌套其他重试层，避免放大调用次数。
+            retry_messages = [
+                *messages,
+                HumanMessage(
+                    content=(
+                        f"Your previous response could not be used.\n"
+                        f"Error: {type(first_error).__name__}: {first_error}\n"
+                        "Respond again with ONLY one valid QueryPlan JSON object "
+                        "that satisfies the schema and the system rules."
+                    )
+                ),
+            ]
+            return _invoke_planner(retry_messages, state)
 
     return plan_queries
 
@@ -370,8 +493,22 @@ def make_format_report(formatter) -> Any:
     """
 
     def format_report(state: Mapping[str, Any]) -> dict[str, Any]:
-        structured = formatter.invoke(_formatter_messages(state, state.get("registry_entries", [])))
-        draft = structured if isinstance(structured, DiagnosisDraft) else DiagnosisDraft.model_validate(structured)
+        result = formatter.invoke(_formatter_messages(state, state.get("registry_entries", [])))
+        raw = _structured_result_payload(result)
+        # 两处程序拥有的确定性修正，都朝更严格的方向移动：
+        # 1) evidence_ids 保序去重——重复引用是无损可修的格式瑕疵；
+        # 2) high/critical 风险强制要求人工复核——宁可多审不可漏审。
+        if isinstance(raw.get("evidence_ids"), list):
+            seen: set[Any] = set()
+            unique_ids = []
+            for evidence_id in raw["evidence_ids"]:
+                if evidence_id not in seen:
+                    seen.add(evidence_id)
+                    unique_ids.append(evidence_id)
+            raw["evidence_ids"] = unique_ids
+        if raw.get("risk_level") in ("high", "critical"):
+            raw["requires_human_review"] = True
+        draft = DiagnosisDraft.model_validate(raw)
         if draft.request_id != state["request_id"] or draft.device_id != state["device_id"]:
             raise RuntimeError("structured diagnostic response did not preserve request identity")
         return {"draft": draft.model_dump(mode="python")}
