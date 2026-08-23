@@ -39,13 +39,16 @@ SSE 客户端的完整交互循环：开流 → 收到 `approval_required` → `
 
 - 默认离线套件 182 项收集：180 通过，2 项 live 默认跳过；连续三次稳定（约 3.0 秒）。API 新增 8 项：无 key/错 key 401、outcome 契约、非法标识符 400、限流 429+Retry-After 且按 key 隔离、SSE 事件序列（node…done）、审批决策校验 422、服务无 key 拒绝启动、错误脱敏。
 - Live Ollama HTTP 全链路：uvicorn 真实启动 → `/health` 200 → 无 key 请求 401 → 同步诊断返回 4 条证据 → SSE 流收到 6 个 `node` + 1 个 `done`（报告含 3 个振动测点与设备阈值证据）。
-- 未验证：Docker 镜像构建与容器内运行（本机无 Docker 守护进程验证记录）、CI workflow 的真实 GitHub 运行、多副本部署、TLS 终结。
+- 新增回归测试 `test_stream_emits_approval_required_then_resume_via_approvals` 后离线套件为 183 项收集（181 通过 + 2 项 live 默认跳过）。
+- CI 真实 GitHub 运行通过：run `32663399414` 与 `32663476922`（pytest job 约 25s 全绿）；docker job 在 ubuntu runner 上完成镜像构建与容器内 `/health` 冒烟（`Build runtime image`、`Smoke test container health endpoint` 均 success），关闭了本机无 Docker 守护进程导致的验证缺口。
+- 未验证：多副本部署、TLS 终结。
 
 ## 6. 过程复盘
 
 - `Settings.api_key` 使用 `SecretStr`，`str()` 会得到掩码导致全部请求 401；修复为 `get_secret_value()` 解析并保留两种注入方式的兼容。
 - SSE 处理器里残留了一段未实现的"优雅停机"属性访问，使每条流首事件变成 error；删除死代码后事件序列符合契约。
 - 测试夹具的 fake draft 固定了 request_id，而 API 未传 request_id 时自动生成 uuid，身份校验正确拦截——测试数据必须与生产校验规则对齐。
+- `/approvals/{thread_id}` 恢复请求返回 500（真实错误被脱敏为 `'request_id'` KeyError）：`_build_graph()` 每次调用新建 `InMemorySaver`，审批端点拿到空 checkpoint 后把 `Command(resume=...)` 当作全新 run 输入。修复是把 checkpointer 提升为 `create_app` 级闭包单例，三个端点共享同一进程内存储。教训：脱敏兜底会把根因变成无信息量的 500，诊断时需要绕过脱敏层取原始错误。
 
 ## 7. 项目全景与剩余工作
 
@@ -53,5 +56,4 @@ SSE 客户端的完整交互循环：开流 → 收到 `approval_required` → `
 
 1. 三项评测最终目标指标未达标（0.81/0.727/0.84），改进方向见 phase5 文档 §4。
 2. 多副本部署所需的持久 Checkpointer、分布式限流与台账存储。
-3. Docker 构建/CI 真实运行的验证（需相应环境授权）。
-4. TLS 终结、请求日志审计与在线监控（AGENTS.md 归入上线后能力）。
+3. TLS 终结、请求日志审计与在线监控（AGENTS.md 归入上线后能力）。
