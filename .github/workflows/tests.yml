@@ -31,3 +31,28 @@ jobs:
         env:
           INDUSTRIAL_AGENT_TRACING_ENABLED: "false"
         run: python -m pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build runtime image
+        run: docker build -t industrial-agent:ci .
+
+      - name: Smoke test container health endpoint
+        run: |
+          docker run -d --name smoke -p 8000:8000 \
+            -e INDUSTRIAL_AGENT_API_KEY=ci-smoke-key \
+            industrial-agent:ci
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health | grep -q ok; then
+              echo "container health check passed"
+              docker logs smoke
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "container did not become healthy in time"
+          docker logs smoke
+          exit 1
