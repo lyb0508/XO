@@ -2,6 +2,17 @@ lock-version = "1.0"
 created-by = "pip"
 
 [[packages]]
+name = "annotated-doc"
+version = "0.0.5"
+
+[[packages.wheels]]
+name = "annotated_doc-0.0.5-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/3e/30/e900b21425a860e195f32e37657aa1f7c7f2b1bfb26f03ca209b90933c06/annotated_doc-0.0.5-py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101"
+
+[[packages]]
 name = "annotated-types"
 version = "0.8.0"
 
@@ -46,6 +57,28 @@ url = "https://files.pythonhosted.org/packages/8a/33/56d97ade41c8db611e727168c52
 sha256 = "aea996a6aba25260827c9ea511d1addfde2da9eb686ac961838509086188b7e6"
 
 [[packages]]
+name = "click"
+version = "8.4.2"
+
+[[packages.wheels]]
+name = "click-8.4.2-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/fb/e2/79c688af8b210d232694e31e59da9f6ec747bae31c3f5946e4e9b98860d5/click-8.4.2-py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "e6f9f66136c816745b9d65817da91d61d957fb16e02e4dcd0552553c5a197b76"
+
+[[packages]]
+name = "colorama"
+version = "0.4.6"
+
+[[packages.wheels]]
+name = "colorama-0.4.6-py2.py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+
+[[packages]]
 name = "distro"
 version = "1.9.0"
 
@@ -55,6 +88,17 @@ url = "https://files.pythonhosted.org/packages/12/b3/231ffd4ab1fc9d679809f356ceb
 
 [packages.wheels.hashes]
 sha256 = "7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2"
+
+[[packages]]
+name = "fastapi"
+version = "0.141.1"
+
+[[packages.wheels]]
+name = "fastapi-0.141.1-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/cb/03/10388a42375ee7e4ac9b94eb2c5c569c8b5795e377e701c9ac3ad63de890/fastapi-0.141.1-py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3"
 
 [[packages]]
 name = "h11"
@@ -437,6 +481,17 @@ url = "https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f
 sha256 = "2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2"
 
 [[packages]]
+name = "starlette"
+version = "1.6.0"
+
+[[packages.wheels]]
+name = "starlette-1.6.0-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/c8/cb/6a6a47d5b464bd08695d254f3da6e7986cc70c9fa5d778eda57538edfe56/starlette-1.6.0-py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c"
+
+[[packages]]
 name = "tenacity"
 version = "9.1.4"
 
@@ -512,6 +567,17 @@ url = "https://files.pythonhosted.org/packages/76/f0/e602ae0a1b139a7826e5189b93d
 
 [packages.wheels.hashes]
 sha256 = "9e311f908d2f842fca4c7dcebc4f10306b8089b204ef04cf6704b4332c9ff6ff"
+
+[[packages]]
+name = "uvicorn"
+version = "0.52.4"
+
+[[packages.wheels]]
+name = "uvicorn-0.52.4-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/f1/79/4a20b54ab0491485ccd8c077db2d39187c7f12b3e15485d38a7be37c81b4/uvicorn-0.52.4-py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "f86e41a149d7d05a9969337e3946a9c171c06a5d42680896daaba624aeac8da1"
 
 [[packages]]
 name = "websockets"

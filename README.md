@@ -20,6 +20,10 @@ python -m pip check
 Copy-Item .env.example .env
 ```
 
+HTTP API 服务（阶段六）：设置 `INDUSTRIAL_AGENT_API_KEY` 后启动，
+`GET /health` 免认证，其余端点需要 `X-API-Key` 头；同步诊断用
+`POST /diagnoses`，流式执行与审批往返见 `docs/phase6-engineering.md`。
+
 默认配置是本地 Ollama：`PROVIDER=ollama`、模型 `qwen2.5:7b`、地址 `http://127.0.0.1:11434`。先在本机准备并启动该模型，然后运行：
 
 ```powershell
@@ -52,6 +56,7 @@ python -m pytest
 - `app/tools/`：五个固定模拟数据的只读工具。
 - `app/retrieval/`：手册 RAG：embedding 工厂、进程内向量库、带引用元数据的检索。
 - `evaluations/`：LangSmith 评测：50 条固定数据集、确定性评测器、本地优先的实验运行器。
+- `app/api/`：FastAPI 服务：同步诊断、SSE 流式执行、HTTP 审批、API key 认证与限流。
 - `app/memory/`：有界短期会话记忆与仅记录已批准动作的长期台账。
 - `app/graphs/`：LangGraph 编排：规划节点、并行 fan-out、Reducer 合并、条件路由、Checkpoint/Interrupt 人工审批与 fail-closed 分支。
 - `app/agents/`：证据注册表转换边界、振动门控与报告格式化（两阶段 Agent 入口保留）。
@@ -64,5 +69,6 @@ python -m pytest
 - [`docs/phase3-persistence-approval.md`](docs/phase3-persistence-approval.md)：Checkpoint/Interrupt 审批流、幂等语义与线程隔离。
 - [`docs/phase4-retrieval-memory.md`](docs/phase4-retrieval-memory.md)：手册 RAG、阈值校准纪律与受控记忆。
 - [`docs/phase5-evaluation.md`](docs/phase5-evaluation.md)：50 条固定评测集、指标基线与根因分析。
+- [`docs/phase6-engineering.md`](docs/phase6-engineering.md)：HTTP API/SSE 协议、安全设计与部署形态。
 
 2026-08-23 验证记录包括 Python 3.13.12、`pip check`、`compileall app tests`，以及离线 170 项测试（另有 2 项 live 测试默认跳过）通过；阶段 2/3/4 各有本地 Ollama live smoke 通过记录（含完整人工审批链路与台账落盘）；阶段 5 完成 50 条 live 全量评测基线：工具选择 0.81 / 拒答 0.727 / 轨迹 0.84，三项最终目标指标未达标且差距已量化。完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。

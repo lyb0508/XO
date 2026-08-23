@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     session_memory_max_turns: int = Field(default=5, ge=1, le=50)
     memory_ledger_path: str = Field(default="data/memory/approved_actions.jsonl", min_length=1, max_length=256)
 
+    # HTTP API. The service refuses to start without a configured API key.
+    api_key: SecretStr | None = None
+    api_rate_limit: int = Field(default=30, ge=1, le=10_000)
+
     tracing_enabled: bool = False
     tracing_project: str = Field(
         default="industrial-diagnostic-agent-dev", min_length=1, max_length=128
