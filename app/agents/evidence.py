@@ -1,4 +1,23 @@
-"""Program-owned canonical evidence registry for the diagnostic formatter."""
+"""Program-owned canonical evidence registry for the diagnostic formatter.
+
+本模块维护一份由程序持有的"canonical 证据注册表"：把工具返回的成功 payload
+解析成带稳定 evidence_id 的不可变条目（RegistryEntry），供诊断报告格式化器
+按 ID 引用。
+
+在整个项目中的位置：位于两段式诊断 Agent 的第一、二阶段之间——第一阶段产出
+ToolMessage 列表后，由 build_evidence_registry 转换成注册表；第二阶段的模型
+只能看到 formatter_payload 暴露的内容，最终通过 select 取回被引用的事实。
+
+数据来源：仅接受"状态为成功"的 ToolMessage 内容（JSON 对象）；not_found 视为
+一次合法完成但贡献零证据的调用。工具输出属于不可信输入，每个字段都要过类型
+与取值校验后才准入册。
+
+副作用边界：纯内存、只读转换，不访问数据库、网络或文件系统。
+
+失败时的行为：payload 缺字段、类型不符、device_id 与请求不符、稳定 ID 冲突等
+一律抛 RuntimeError；status=error 的 ToolMessage 会记入 unresolved_tool_errors，
+直到同名工具后来返回合法成功结果才清除，否则上层必须阻断报告生成。
+"""
 
 from __future__ import annotations
 
@@ -30,12 +49,14 @@ def _text(value: Any, context: str) -> str:
 
 
 def _number(value: Any, context: str) -> float:
+    # bool 是 int 的子类，必须显式排除，否则 true/false 会被悄悄当成数值 1/0。
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         _fail(f"{context} must be numeric")
     return float(value)
 
 
 def _observed_at(value: Any, context: str) -> datetime:
+    # 把结尾的 Z 替换成 +00:00，兼容不识别 Z 后缀的 fromisoformat 实现。
     timestamp = _text(value, context)
     try:
         parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
@@ -58,7 +79,11 @@ def _json_safe(value: Any) -> Any:
 
 @dataclass(frozen=True, slots=True)
 class RegistryEntry:
-    """Immutable binding between an evidence ID and program-verified facts."""
+    """Immutable binding between an evidence ID and program-verified facts.
+
+    不可变绑定：evidence_id 与程序逐字段校验过的 facts 捆绑在一起。facts 用
+    MappingProxyType 包装，任何人都无法在入册后偷偷改写证据内容。
+    """
 
     evidence: EvidenceItem
     device_id: str
@@ -68,13 +93,22 @@ class RegistryEntry:
 
 @dataclass(frozen=True, slots=True)
 class EvidenceRegistry:
-    """Immutable canonical records that the formatter may only reference by ID."""
+    """Immutable canonical records that the formatter may only reference by ID.
+
+    格式化器（模型）只能通过 ID 引用这里的条目，不能直接书写证据事实；
+    select 会拒绝注册表中不存在的 ID，从机制上杜绝"幻觉引用"。
+    """
 
     entries: Mapping[str, RegistryEntry]
     unresolved_tool_errors: frozenset[str]
 
     def formatter_payload(self) -> dict[str, Any]:
-        """Return deterministic, still-untrusted evidence context for the model."""
+        """Return deterministic, still-untrusted evidence context for the model.
+
+        中文说明：为第二阶段的模型生成确定性上下文——按 evidence_id 排序输出，
+        同样的注册表永远得到同样的字节序列。注意返回内容仍视为不可信数据，
+        上层 Prompt 必须声明它不是指令。
+        """
 
         return {
             "canonical_evidence": [
@@ -91,6 +125,11 @@ class EvidenceRegistry:
         }
 
     def select(self, evidence_ids: list[str]) -> list[RegistryEntry]:
+        """按模型给出的 ID 列表取回对应条目；出现注册表外的 ID 立即抛错。
+
+        这是"幻觉引用"的最终防线：哪怕模型编造了一个看起来合理的 evidence_id，
+        只要它不在注册表里，报告就无法生成。
+        """
         unknown = set(evidence_ids) - set(self.entries)
         if unknown:
             raise RuntimeError(
@@ -308,8 +347,13 @@ def entries_from_tool_payload(
     """Convert one successful tool payload into canonical registry entries.
 
     This is the shared conversion boundary for both the message-driven phase-one
-    flow and the graph-driven phase-two flow. A ``not_found`` payload is a
+    flow and the graph-driven phase-two flow.     A ``not_found`` payload is a
     completed call that intentionally contributes no evidence.
+
+    中文说明：单个成功 payload 转换为注册表条目的统一入口，消息驱动（第一阶段）
+    与 Graph 驱动（第二阶段）两条链路共用这一转换边界。status 必须是 ok 或
+    not_found；not_found 表示"查询合法执行但没有命中"，返回空列表而不是报错。
+    不认识的工具名或其它 status 值都会抛 RuntimeError。
     """
 
     payload = _mapping(payload, f"{tool_name}.payload")
@@ -325,7 +369,11 @@ def entries_from_tool_payload(
 
 
 def serialize_entry(entry: RegistryEntry) -> dict[str, Any]:
-    """Return a JSON-safe snapshot so graph state stays serializable."""
+    """Return a JSON-safe snapshot so graph state stays serializable.
+
+    中文说明：把条目转成可被 JSON 序列化（mode="json"）的快照，供 LangGraph
+    state 与 checkpoint 保存——Graph State 必须可序列化才能支持持久化与恢复。
+    """
 
     return {
         "evidence": entry.evidence.model_dump(mode="json"),
@@ -336,7 +384,11 @@ def serialize_entry(entry: RegistryEntry) -> dict[str, Any]:
 
 
 def deserialize_entry(data: Mapping[str, Any]) -> RegistryEntry:
-    """Rebuild an immutable entry from its serialized snapshot."""
+    """Rebuild an immutable entry from its serialized snapshot.
+
+    中文说明：从快照重建不可变条目，与 serialize_entry 互为逆操作，
+    用于从 checkpoint 恢复注册表内容。
+    """
 
     return RegistryEntry(
         evidence=EvidenceItem.model_validate(data["evidence"]),
@@ -347,15 +399,22 @@ def deserialize_entry(data: Mapping[str, Any]) -> RegistryEntry:
 
 
 def build_evidence_registry(messages: list[Any], requested_device_id: str) -> EvidenceRegistry:
-    """Create canonical evidence and preserve tool failures until a valid retry clears them."""
+    """Create canonical evidence and preserve tool failures until a valid retry clears them.
+
+    中文说明：扫描消息列表中的全部 ToolMessage，把成功 payload 入册为
+    canonical 证据；工具报错不会立即失败，而是记下工具名进入"未解决"集合，
+    等同一工具后来返回合法成功结果时自动清除——这样模型的一次合法重试就能
+    自我修复，而遗留的未解决错误由上层显式阻断报告。同一 evidence_id 出现
+    内容不一致的两条记录视为数据冲突，直接抛错。
+    """
 
     entries: dict[str, RegistryEntry] = {}
     unresolved_tool_errors: set[str] = set()
     for message in messages:
         if not isinstance(message, ToolMessage):
             continue
-        # A tool-argument failure is not evidence. It remains unresolved until
-        # this same known tool returns a legal successful payload below.
+        # 参数错误的工具调用本身不算证据：该工具保持"未解决"状态，
+        # 直到下方同一工具返回一次合法的成功 payload 才清除。
         if message.status == "error":
             unresolved_tool_errors.add(message.name)
             continue

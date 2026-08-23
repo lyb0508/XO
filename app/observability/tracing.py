@@ -1,7 +1,19 @@
 """Explicit, redacted LangSmith tracing for the first learning milestone.
 
-Tracing is deliberately opt-in: importing this module and entering a disabled
-context neither constructs a LangSmith client nor makes a network request.
+本模块提供显式、经过脱敏的 LangSmith 追踪封装。
+
+核心设计（fail-closed）：追踪默认关闭——只有 ``settings.tracing_enabled``
+明确为真时才创建 Client；关闭时连 LangSmith client 都不会构建，更不会有
+任何网络请求。启用时强制要求 API key 且必须显式传入配置好的 Client，
+环境变量无法悄悄改变 trace 的目的地。
+
+脱敏边界：所有上传的 inputs / outputs / metadata 都经过 ``redact_payload``
+（redaction），Client 级 anonymizer 也指向同一函数；敏感键名命中 allowlist
+之外的黑名单模式即整值替换为占位符。
+
+flush 时机：``tracing_run`` 上下文退出时立即 flush 并 close——业务路径上
+投递失败会抛 ``TraceDeliveryFailure``；若业务异常已在飞行中，则降级为
+warning，绝不掩盖原始异常。
 """
 
 from __future__ import annotations
@@ -18,9 +30,13 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from app.config.settings import Settings
 
 
+# 脱敏后的固定占位符：替换后的文本仍能看出"这里曾有敏感值"及其类型，
+# 便于在 Trace 里发现泄露企图，又不暴露真实内容。
 REDACTED_SECRET = "[REDACTED_SECRET]"
 REDACTED_EMAIL = "[REDACTED_EMAIL]"
 REDACTED_PHONE = "[REDACTED_PHONE]"
+# 以下正则按"键名黑名单 -> 赋值语句 -> Bearer -> 常见 key 格式 -> 显式哨兵
+# -> 邮箱 -> 手机号"的层次覆盖最常见的密钥与个人信息形态。
 _SENSITIVE_KEY = re.compile(
     r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|"
     r"authorization|cookie|secret|credential|bearer)",
@@ -38,17 +54,22 @@ _EXPLICIT_SECRET_SENTINEL = re.compile(
 )
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _CN_MOBILE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+# metadata/tags 只允许这种安全字符集，防止换行、引号等被塞进上传内容。
 _SAFE_VALUE = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 
 class _StrictTraceModel(BaseModel):
-    """Trace metadata is intentionally small and rejects future free-form fields."""
+    """Trace 元数据刻意保持极小集合，并拒绝一切未来新增的自由字段。
+
+    ``extra="forbid"`` 是 allowlist 策略的代码化：任何想往 trace 里多塞一个
+    字段的改动都必须先修改这里的模型定义并接受审查。
+    """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, frozen=True)
 
 
 class RunContext(_StrictTraceModel):
-    """Identifiers that associate a single CLI invocation with a trace."""
+    """把一次 CLI 调用关联到一条 trace 所需的标识符。"""
 
     request_id: str = Field(min_length=1, max_length=128)
     thread_id: str = Field(min_length=1, max_length=128)
@@ -62,7 +83,11 @@ class RunContext(_StrictTraceModel):
 
 
 class TraceMetadata(_StrictTraceModel):
-    """The complete allow-listed metadata that may leave the local process."""
+    """允许离开本进程的 trace metadata 的完整 allowlist。
+
+    只有这六个字段可以上传，且每个值都通过字符集校验——保证不会把用户
+    输入、密钥或其他敏感数据借道 metadata/tags 泄露到 LangSmith。
+    """
 
     request_id: str = Field(min_length=1, max_length=128)
     thread_id: str = Field(min_length=1, max_length=128)
@@ -100,7 +125,7 @@ class TraceMetadata(_StrictTraceModel):
         )
 
     def tags(self) -> list[str]:
-        """Build tags only from fixed, validated configuration values."""
+        """只从固定的、已校验的配置值构建 tags（环境/提供商/Agent 版本）。"""
 
         return [
             f"environment:{self.environment}",
@@ -110,11 +135,11 @@ class TraceMetadata(_StrictTraceModel):
 
 
 def _redact_text(value: str) -> str:
-    """Mask common secret and personal-data formats without flattening structure."""
+    """按已知格式掩掉密钥与个人信息，同时不破坏文本整体结构。"""
 
     value = _BEARER_SECRET.sub(REDACTED_SECRET, value)
-    # Process Bearer credentials first. Otherwise an ``Authorization: Bearer``
-    # assignment would mask only the word "Bearer" and leave its token behind.
+    # 必须先处理 Bearer 凭据：否则 ``Authorization: Bearer xxx`` 会被赋值
+    # 规则只遮住 "Bearer" 这个词，把真正的 token 留在原文里。
     value = _ASSIGNMENT_SECRET.sub(REDACTED_SECRET, value)
     value = _API_KEY_SECRET.sub(REDACTED_SECRET, value)
     value = _EXPLICIT_SECRET_SENTINEL.sub(REDACTED_SECRET, value)
@@ -123,10 +148,12 @@ def _redact_text(value: str) -> str:
 
 
 def redact_payload(payload: Any) -> Any:
-    """Return a structurally equivalent payload with known sensitive values masked.
+    """递归脱敏，返回结构等价但已知敏感值被掩掉的副本。
 
-    This function is used for LangSmith inputs, outputs, metadata, and client
-    anonymization. It never calls ``SecretStr.get_secret_value()``.
+    用于 LangSmith 的 inputs、outputs、metadata 以及 Client 级 anonymizer。
+    关键规则：遇到 ``SecretStr`` 直接替换为占位符，绝不调用
+    ``get_secret_value()``；Mapping 的键名命中敏感模式时整个值一起替换，
+    而不是只递归处理值。
     """
 
     if isinstance(payload, SecretStr):
@@ -152,21 +179,28 @@ def redact_payload(payload: Any) -> Any:
 
 
 def _safe_error_message(error: BaseException) -> str:
+    """错误消息先脱敏再外传，避免异常文本把密钥带进日志或 Trace。"""
+
     return str(redact_payload(str(error))) or error.__class__.__name__
 
 
 class TraceDeliveryFailure(RuntimeError):
-    """A local, explicit signal that an enabled trace was not delivered."""
+    """本地显式信号：一条已启用的 trace 未能成功投递到 LangSmith。"""
 
 
 def _close_client(client: Client, *, preserve_business_error: bool) -> None:
-    """Flush and close while never replacing an Agent/business exception."""
+    """flush 并关闭 client，同时绝不替换（掩盖）Agent/业务异常。
+
+    ``preserve_business_error=True`` 表示调用方有业务异常正在向外传播：
+    此时投递失败只降级为 warning，让原始异常继续抛出；否则投递失败本身
+    就是需要暴露的问题，包装成 ``TraceDeliveryFailure`` 抛出。
+    """
 
     errors: list[BaseException] = []
     for operation in (client.flush, client.close):
         try:
             operation()
-        except BaseException as error:  # SDK cleanup must not hide a diagnosis failure.
+        except BaseException as error:  # SDK 清理失败不能掩盖诊断主流程的异常。
             errors.append(error)
 
     if not errors:
@@ -183,20 +217,21 @@ def _close_client(client: Client, *, preserve_business_error: bool) -> None:
 
 @contextmanager
 def tracing_run(settings: Settings, metadata: TraceMetadata) -> Iterator[None]:
-    """Enable one safe LangSmith trace only when configuration explicitly permits it.
+    """仅当配置明确允许时，启用一次安全的 LangSmith trace。
 
-    A disabled context is a no-op. When enabled, an API key is mandatory and a
-    client is supplied explicitly so environment variables cannot silently
-    change the trace destination. Remote delivery failures are raised unless an
-    Agent exception is already in flight, in which case they are surfaced as a
-    warning while preserving that primary exception.
+    关闭路径：``settings.tracing_enabled`` 为假时本上下文是 no-op——不建
+    client、不发请求。这是 fail-closed 默认。
+
+    启用路径：必须配置 API key（缺失或空白都直接报错），并且显式传入按
+    配置构建的 Client，环境变量无法悄悄改变 trace 目的地；inputs/outputs/
+    metadata 与 anonymizer 全部挂上 ``redact_payload``。远端投递失败默认
+    抛出；若业务异常已在飞行中则降级为 warning 并保留原异常。
     """
 
     if not settings.tracing_enabled:
-        # ``enabled=False`` explicitly overrides LANGSMITH_TRACING and the
-        # legacy LANGCHAIN_TRACING_V2 host settings. ``parent=False`` prevents
-        # an enclosing third-party trace from being inherited. The SDK restores
-        # the previous context when this block exits.
+        # ``enabled=False`` 显式覆盖 LANGSMITH_TRACING 以及旧版
+        # LANGCHAIN_TRACING_V2 环境变量；``parent=False`` 防止继承外层
+        # 第三方库开启的 trace。离开代码块时 SDK 自动恢复先前上下文。
         with tracing_context(enabled=False, parent=False):
             yield
         return
@@ -204,8 +239,8 @@ def tracing_run(settings: Settings, metadata: TraceMetadata) -> Iterator[None]:
     if settings.langsmith_api_key is None:
         raise RuntimeError("LangSmith tracing is enabled but no API key is configured")
 
-    # Keep the plaintext value in this local only long enough to reject blank
-    # configuration and construct the explicitly configured SDK client.
+    # 明文 key 只在这个局部变量里停留到"拒绝空配置 + 构建显式配置的 SDK
+    # Client"为止，之后不再持有。
     api_key = settings.langsmith_api_key.get_secret_value()
     if not api_key.strip():
         raise RuntimeError("LangSmith tracing is enabled but its API key is blank")
@@ -220,6 +255,9 @@ def tracing_run(settings: Settings, metadata: TraceMetadata) -> Iterator[None]:
         hide_metadata=redact_payload,
     )
     try:
+        # flush 时机：上下文退出即 flush+close。except 分支说明业务异常在
+        # 飞行中，投递失败降级为 warning；else 分支说明业务正常，投递失败
+        # 必须作为 TraceDeliveryFailure 暴露出来。
         with tracing_context(
             project_name=settings.tracing_project,
             tags=metadata.tags(),

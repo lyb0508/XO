@@ -1,4 +1,24 @@
-"""One-turn, read-only industrial diagnosis Agent."""
+"""One-turn, read-only industrial diagnosis Agent.
+
+本模块实现"两段式"诊断 Agent，是工业故障研判流程的核心执行层：
+第一阶段用 ``create_agent`` 构建带工具的取证 Agent，通过只读工具收集设备信息、
+测点历史、报警历史、工单历史与手册检索证据；第二阶段用 ``with_structured_output``
+把同一个模型包装成没有任何工具的结构化格式化器，只负责按 schema 产出
+DiagnosisDraft。
+
+在整个项目中的位置：上游是 LangGraph 编排层与用户问题，下游产出带证据的
+DiagnosisReport 供审批环节使用。
+
+数据来源：第一阶段的事实全部来自注册工具返回的 ToolMessage；第二阶段的模型
+只能引用程序生成的 canonical evidence ID，不允许自行编造测量值或事实字段。
+
+副作用边界：全程只读——不创建、不修改、不确认任何设备或工单；模型调用次数与
+工具调用次数由 Middleware 硬性限额，超限直接以 error 终止，防止无限循环。
+
+失败时的行为：存在未恢复的工具错误、结构化输出篡改 request_id/device_id、
+振动证据选择不完整等情况会立即抛出异常，由上层决定重试或拒绝，绝不静默地
+把失败伪装成"成功报告"。
+"""
 
 from __future__ import annotations
 
@@ -48,10 +68,15 @@ requested DiagnosisDraft JSON-schema object."""
 
 @dataclass(frozen=True, slots=True)
 class AgentLimits:
-    """Execution budgets enforced by middleware, not merely described in a prompt."""
+    """Execution budgets enforced by middleware, not merely described in a prompt.
 
-    # This budget is only for evidence collection. Report formatting is one
-    # separately fixed model invocation and is deliberately not counted here.
+    执行预算由 Middleware 在代码层强制执行，而不是只在 Prompt 里"口头承诺"：
+    模型总调用次数、工具总调用次数、单个工具的调用次数都有硬上限，任何一项
+    超限都会以 error 结束本次运行。这是防止小模型陷入无限重试循环的关键安全阀。
+    """
+
+    # 这份预算只约束证据收集阶段；报告格式化是另一次独立固定的模型调用，
+    # 刻意不计入此处。
     model_run_limit: int = 8
     tool_run_limit: int = 8
     per_tool_run_limit: int = 2
@@ -62,14 +87,23 @@ class AgentLimits:
 
 
 class Invokable(Protocol):
-    """Minimal protocol shared by a compiled Agent and structured formatter."""
+    """Minimal protocol shared by a compiled Agent and structured formatter.
+
+    编译后的取证 Agent 与结构化格式化器只需共同满足"可 invoke"这一最小协议，
+    TwoStageDiagnosticAgent 才能用同一类型统一持有两者，方便替换与测试。
+    """
 
     def invoke(self, input: Any, config: dict[str, Any] | None = None) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
 class TwoStageDiagnosticAgent:
-    """Program-controlled split between evidence collection and report formatting."""
+    """Program-controlled split between evidence collection and report formatting.
+
+    用两个 Invokable 显式拆分职责：evidence_agent 只做证据收集（拥有工具），
+    report_formatter 只做报告格式化（没有任何工具）。这样既避免取证完成后再次
+    进入工具调用循环，也让两个阶段可以分别测试、分别观测。
+    """
 
     evidence_agent: Invokable
     report_formatter: Invokable
@@ -86,6 +120,12 @@ def build_diagnostic_agent(
     The first stage owns tool selection only. The second stage is given the same
     model's JSON-schema wrapper but no business tools, avoiding a structured
     tool-call loop after evidence collection.
+
+    中文说明：第一阶段通过 Middleware 设置三层调用限额（模型总次数、工具总次数、
+    单个工具次数），任何一层超限都会抛错终止，而不是静默继续；第二阶段复用同一个
+    模型，但绑定 DiagnosisDraft 的 JSON schema 且不给任何业务工具，因此只会输出
+    一次结构化结果。structured_output_method 允许按模型能力在 json_schema 与
+    function_calling 之间切换。构建失败（如限额参数非法）会立即抛出 ValueError。
     """
 
     active_limits = limits or AgentLimits()
@@ -149,6 +189,11 @@ def repair_vibration_selection(draft: DiagnosisDraft, registry: EvidenceRegistry
     repair only ever adds canonical registry entries; it never invents facts.
     Contradictory thresholds are not auto-selected so the downstream gate still
     fails closed.
+
+    中文说明：小型本地模型有时会忘记引用设备阈值或某个已取回的振动测点，尽管
+    Graph 已经取到了这些证据。修补逻辑只会把注册表里真实存在的 canonical 条目
+    补进 evidence_ids，绝不编造事实；当设备阈值存在互相矛盾的多个值时不做自动
+    选择，让下游门禁按"失败关闭"（fail closed）处理。
     """
 
     if not draft.evidence_sufficient:
@@ -169,14 +214,20 @@ def repair_vibration_selection(draft: DiagnosisDraft, registry: EvidenceRegistry
     try:
         return DiagnosisDraft.model_validate(payload)
     except ValidationError:
-        # An over-full or otherwise invalid repair must not crash the graph.
-        # Falling back keeps the original draft, and the vibration gate then
-        # rejects it through its explicit failure paths instead.
+        # 修补后的 evidence_ids 若超出 schema 上限或非法，绝不能让整张图崩溃：
+        # 回退到原始 draft，让振动门禁随后通过它自己的显式失败路径拒绝该结论。
         return draft
 
 
 def validate_vibration_gate(draft: DiagnosisDraft, registry: EvidenceRegistry) -> None:
-    """Enforce threshold evidence completeness without interpreting model prose."""
+    """Enforce threshold evidence completeness without interpreting model prose.
+
+    中文说明：振动诊断的安全门禁——只依据程序持有的注册表事实做校验，不解读
+    模型的自然语言解释。一旦模型声称证据充分且引用了振动测点，就必须：选全全部
+    返回的振动点、同时引用设备阈值证据、阈值不得互相矛盾，且"超过阈值"与
+    risk_level=low 不得共存。任何一条不满足都抛出 RuntimeError，
+    由上层把本次诊断判为失败而不是带病通过。
+    """
 
     if not draft.evidence_sufficient:
         return
@@ -210,7 +261,13 @@ def validate_vibration_gate(draft: DiagnosisDraft, registry: EvidenceRegistry) -
 
 
 def finalize_report(draft: DiagnosisDraft, registry: EvidenceRegistry) -> DiagnosisReport:
-    """Replace model-selected IDs with program-owned immutable evidence facts."""
+    """Replace model-selected IDs with program-owned immutable evidence facts.
+
+    中文说明：把模型产出的 Draft 升级为最终报告——先修补振动证据引用，再过安全
+    门禁，最后用注册表里不可变的事实条目整体替换模型挑选的 evidence_ids。
+    模型在最终报告里只保留"选择权"，事实内容全部来自程序，因此报告不可能携带
+    模型编造的测量值。若修补或门禁失败会直接抛异常，不会产出半成品报告。
+    """
 
     draft = repair_vibration_selection(draft, registry)
     validate_vibration_gate(draft, registry)
@@ -221,6 +278,7 @@ def finalize_report(draft: DiagnosisDraft, registry: EvidenceRegistry) -> Diagno
 
 
 # Phase-one private names kept as aliases so existing callers stay stable.
+# 兼容别名：保留第一阶段使用过的私有名称，让既有调用方不受重构影响。
 _validate_vibration_gate = validate_vibration_gate
 _finalize_report = finalize_report
 
@@ -232,7 +290,16 @@ def run_diagnosis(
     request_id: str,
     device_id: str = "PUMP-003",
 ) -> DiagnosisReport:
-    """Collect ToolMessages, then format exactly once with a schema-bound model."""
+    """Collect ToolMessages, then format exactly once with a schema-bound model.
+
+    中文说明：一次完整诊断的主流程。先做参数校验（空问题、空 request_id 直接
+    拒绝），再驱动取证 Agent 收集证据；证据全部转换为注册表后，把确定性 JSON
+    一次性交给无工具的结构化格式化器产出 Draft；最后校验请求身份并 finalize。
+
+    失败时的行为：取证的返回结构异常、存在未恢复的工具错误、模型篡改
+    request_id/device_id，都会抛出 RuntimeError——宁可整体失败，
+    也绝不生成引用不实证据的报告。
+    """
 
     if not question or not question.strip():
         raise ValueError("question must not be empty")
@@ -257,7 +324,10 @@ def run_diagnosis(
         raise RuntimeError("evidence collection returned no message sequence")
     registry = build_evidence_registry(evidence_result["messages"], device_id)
     if registry.unresolved_tool_errors:
+        # 存在"报过错且尚未被同名工具成功重试"的工具时，证据链不完整，
+        # 必须阻断格式化阶段，避免模型在缺失证据的情况下硬凑结论。
         raise RuntimeError("evidence collection contains unresolved tool errors; report formatting is blocked")
+    # 键排序加紧凑分隔符，保证喂给模型的 JSON 逐字节确定，便于评测对比与复现。
     evidence_json = json.dumps(
         {"untrusted_canonical_evidence": registry.formatter_payload()},
         ensure_ascii=False,
@@ -280,7 +350,11 @@ def run_diagnosis(
         formatting_messages,
         config={"run_name": "report_formatting", "tags": ["report_formatting"]},
     )
+    # with_structured_output(include_raw=False) 通常直接返回模型对象；
+    # 这里仍兼容个别实现返回 dict 的情况，两种来源都过同一 schema 校验。
     draft = structured if isinstance(structured, DiagnosisDraft) else DiagnosisDraft.model_validate(structured)
     if draft.request_id != request_id or draft.device_id != device_id:
+        # 防串号校验：模型输出若篡改了请求身份，说明该结果不可追溯到本次调用，
+        # 必须失败而不是继续。
         raise RuntimeError("structured diagnostic response did not preserve request identity")
     return finalize_report(draft, registry)

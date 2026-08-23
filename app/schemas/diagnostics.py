@@ -1,4 +1,22 @@
-"""Strict schema for a diagnostician's final, evidence-backed response."""
+"""Strict schema for a diagnostician's final, evidence-backed response.
+
+本模块定义诊断结论的两份严格契约：DiagnosisDraft（模型可写的草稿——只能挑选
+evidence_id，不能书写证据事实）与 DiagnosisReport（程序定稿的报告——证据条目
+完全来自 EvidenceRegistry，模型无法掺入编造的测量值）。
+
+在整个项目中的位置：DiagnosisDraft 是两段式诊断 Agent 第二阶段的结构化输出
+目标；DiagnosisReport 是最终交付物，也是审批环节 derive_proposed_action 的
+输入。
+
+数据来源：Draft 由模型结构化输出产生（不可信，必须校验）；Report 由程序把
+Draft 与注册表合并后生成。
+
+副作用边界：纯 schema 定义，无任何 I/O 或写入。
+
+失败时的行为：未知字段、超长文本、证据引用不一致、"证据充分却没给 ID"或
+"高风险却不要求人工复核"等矛盾组合都会被 validator 拒绝，把坏输出挡在
+报告环节之外。
+"""
 
 from __future__ import annotations
 
@@ -9,12 +27,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 class StrictModel(BaseModel):
-    """Reject unknown output fields so model output cannot silently expand the API."""
+    """Reject unknown output fields so model output cannot silently expand the API.
+
+    公共基类：extra="forbid" 让模型多输出的未知字段直接导致校验失败，
+    防止输出契约被悄悄扩宽；str_strip_whitespace 顺带清理首尾空白。
+    """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
 class LikelyCause(StrictModel):
+    """单条可能原因：必须挂靠至少一个证据 ID，置信度限制在 [0, 1]。"""
+
     cause: str = Field(min_length=1, max_length=300)
     confidence: float = Field(ge=0.0, le=1.0)
     evidence_ids: list[str] = Field(min_length=1, max_length=8)
@@ -28,6 +52,8 @@ class LikelyCause(StrictModel):
 
 
 class EvidenceItem(StrictModel):
+    """一条 canonical 证据的对外形态：ID、类型、来源、摘要与观测时间/版本。"""
+
     evidence_id: str = Field(min_length=1, max_length=128)
     evidence_type: Literal["device", "sensor", "alarm", "work_order", "manual"]
     source_id: str = Field(min_length=1, max_length=128)
@@ -44,7 +70,13 @@ class EvidenceItem(StrictModel):
 
 
 class DiagnosisDraft(StrictModel):
-    """Model-writable diagnosis that can select evidence IDs but cannot write facts."""
+    """Model-writable diagnosis that can select evidence IDs but cannot write facts.
+
+    模型可写的草稿：拥有结论字段（范围、风险、原因、建议），但只能引用
+    evidence_id——真实证据事实由程序在 finalize 阶段从注册表回填。
+    交叉校验保证草稿自洽：引用的 ID 必须在已选集合内，风险等级与
+    evidence_sufficient、requires_human_review 之间不得互相矛盾。
+    """
 
     request_id: str = Field(min_length=1, max_length=128)
     device_id: str = Field(min_length=1, max_length=128)
@@ -97,7 +129,12 @@ class DiagnosisDraft(StrictModel):
 
 
 class DiagnosisReport(StrictModel):
-    """Program-finalized report whose evidence facts originate only from the registry."""
+    """Program-finalized report whose evidence facts originate only from the registry.
+
+    程序定稿的报告：与 Draft 的关键差别是 evidence 字段装的是完整证据条目
+    （EvidenceItem）而非 ID 列表，且这些条目只可能来自 EvidenceRegistry，
+    因此报告中的每一条事实都可追溯到真实工具返回。
+    """
 
     request_id: str = Field(min_length=1, max_length=128)
     device_id: str = Field(min_length=1, max_length=128)

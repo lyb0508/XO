@@ -1,4 +1,14 @@
-"""Create the configured model without performing a network request."""
+"""Create the configured model without performing a network request.
+
+模型 factory：根据配置中的 provider 构造对应的 LangChain 聊天模型对象
+（ChatOllama 或 ChatDeepSeek）。关键约定：构造过程绝不发起网络请求，也绝不
+偷偷换成假模型——假模型只应由测试通过依赖注入显式提供。这样"单元测试用
+stub、生产用真实 provider"的边界才不会被 factory 悄悄打破。
+
+失败行为：provider 不受支持、或 DeepSeek 缺少 API key 时直接抛 ValueError
+快速失败——不降级、不回退到另一个 provider，把配置问题暴露在启动阶段，
+而不是拖到第一次 invoke 才报错。
+"""
 
 from __future__ import annotations
 
@@ -10,12 +20,12 @@ from app.config.settings import Settings
 
 
 def create_chat_model(settings: Settings) -> BaseChatModel:
-    """Build the configured real provider model.
+    """按配置构建真实的 provider 模型。
 
-    Fake models are deliberately supplied by tests through dependency injection
-    to ``build_diagnostic_agent``; this factory never substitutes a provider.
-    Ollama validation remains disabled, and neither branch invokes a model during
-    construction.
+    假模型刻意由测试经依赖注入传给 build_diagnostic_agent，本 factory 绝不
+    替换 provider。Ollama 分支关闭构造期的模型名校验
+    （validate_model_on_init=False）；两个分支在构造阶段都不联网——第一次
+    真正的网络调用发生在首次 invoke 时。
     """
 
     if settings.provider == "ollama":

@@ -1,4 +1,23 @@
-"""Command-line entry point for one read-only industrial diagnosis."""
+"""Command-line entry point for one read-only industrial diagnosis.
+
+CLI 入口（第四阶段起提供）：解析一次诊断请求的参数，组装模型、记忆、手册
+检索与诊断 Graph，执行完整的"研判 ->（如遇高风险动作）人工审批 -> 报告"
+流程，最后向 stdout 打印一份脱敏后的 JSON 报告。
+
+数据流：argv -> argparse -> Settings -> ChatModel + 诊断 Graph -> invoke
+（遇审批中断则在 stderr 上交互式收集人工决策，再用 Command(resume) 恢复）
+-> stdout 输出 JSON 结果。
+
+安全边界：
+* 一切输出（成功报告与错误消息）都先经 redact_payload 脱敏再离开进程；
+* 参数解析失败走机器可读的 JSON 错误路径（CliUsageError），不裸吐 traceback；
+* 审批决策必须来自真实 stdin 输入，CLI 绝不伪造"批准"；
+* stdin 无输入（EOF）时进程失败退出，被中断的线程仍留在 checkpointer 的
+  生命周期内可供恢复，而不是默默替人拍板。
+
+失败行为：任何异常都在 main 最外层捕获、脱敏后以 {"error": ...} 写到
+stderr 并返回退出码 1；成功返回 0。
+"""
 
 from __future__ import annotations
 
@@ -17,21 +36,27 @@ from app.schemas.diagnostics import DiagnosisReport
 
 AGENT_VERSION = "phase4-retrieval-memory"
 DEFAULT_DEVICE_ID = "PUMP-003"
+# 审批交互轮数硬上限：既限制用户反复输错的次数，也杜绝无限审批循环。
 MAX_APPROVAL_ROUNDS = 3
 
 
 class CliUsageError(ValueError):
-    """A controlled parse failure that can use the CLI's safe JSON error path."""
+    """受控的用法错误：交给 CLI 的安全 JSON 错误路径处理，而非裸 traceback。"""
 
 
 class _JsonArgumentParser(argparse.ArgumentParser):
-    """Keep parse failures machine-readable without changing normal --help behavior."""
+    """让参数解析失败保持机器可读，同时不改变正常的 --help 行为。
+
+    argparse 默认在出错时直接打印 usage 并 SystemExit(2)；包装成异常后，
+    main 才能统一捕获、脱敏并输出 JSON 错误。
+    """
 
     def error(self, message: str) -> None:
         raise CliUsageError(str(redact_payload(message)))
 
 
 def _parser() -> argparse.ArgumentParser:
+    """声明 CLI 参数：问题必填；设备/请求/线程/会话标识可选且有默认行为。"""
     parser = _JsonArgumentParser(description="Run one read-only industrial diagnosis.")
     parser.add_argument("--question", required=True, help="Diagnostic question for the mock device.")
     parser.add_argument("--device-id", default=DEFAULT_DEVICE_ID, help="Mock device identifier.")
@@ -46,10 +71,15 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _identifier(value: str | None) -> str:
+    """空白输入回退为随机 UUID，确保 request_id / thread_id 始终非空可用。"""
     return value.strip() if value and value.strip() else str(uuid4())
 
 
 def _read_line(prompt: str) -> str:
+    """从 stdin 读取一行；读到 EOF（如管道关闭）时抛 EOFError 而非静默通过。
+
+    提示语写往 stderr，保证 stdout 只承载最终的 JSON 报告，便于管道消费。
+    """
     print(prompt, file=sys.stderr, end="", flush=True)
     line = sys.stdin.readline()
     if line == "":
@@ -58,11 +88,12 @@ def _read_line(prompt: str) -> str:
 
 
 def _prompt_decision(payload: dict[str, Any]) -> dict[str, Any]:
-    """Collect one structured approval decision from stdin.
+    """从 stdin 收集一次结构化的审批决策。
 
-    The CLI never fabricates a human decision: when no input is available the
-    process fails and the thread stays resumable within its checkpointer's
-    lifetime instead.
+    CLI 绝不伪造人工决策：没有可用输入时进程直接失败，被中断的线程仍留在
+    checkpointer 生命周期内、随时可以恢复。approve/modify/reject 会被映射为
+    approved/modified/rejected；选择 modify 时还需逐行录入修改后的动作
+    （空行结束）；非法输入最多重试 MAX_APPROVAL_ROUNDS 次。
     """
 
     print(json.dumps({"approval_required": payload}, ensure_ascii=False), file=sys.stderr)
@@ -99,6 +130,11 @@ def _prompt_decision(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_with_approval(graph: Any, initial_input: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    """驱动 Graph 直到产出最终结果，途中每次审批中断都与真人交互后恢复。
+
+    与 HTTP 同步端点的"自动拒绝"不同：CLI 场景确有真人在终端旁，所以这里
+    真实等待人类输入；轮数受 MAX_APPROVAL_ROUNDS 硬性封顶，防止无限循环。
+    """
     from langgraph.types import Command
 
     result = graph.invoke(initial_input, config=config)
@@ -115,12 +151,18 @@ def _run_with_approval(graph: Any, initial_input: dict[str, Any], config: dict[s
 
 
 def main(argv: list[str] | None = None) -> int:
+    """一次完整 CLI 诊断的主流程，返回进程退出码（0 成功 / 1 失败）。
+
+    组装顺序：Settings -> Trace 元数据 -> 模型 -> 会话记忆（传入 --session
+    时才创建）-> 长期台账 -> 手册检索库 -> 诊断 Graph；整次 invoke 包裹在
+    tracing_run 里，LangSmith 上能看到完整轨迹。
+    """
     try:
         args = _parser().parse_args(argv)
         if not args.question.strip():
             raise CliUsageError("question must not be empty")
-        # A blank session id must never reach the graph or the memory writer:
-        # normalizing here keeps the report and any side effects consistent.
+        # 空 session id 决不能流入 Graph 或记忆写入方：在此提前归一化，
+        # 保证报告与会话副作用的行为一致。
         args.session_id = (args.session_id or "").strip() or None
         settings = get_settings()
         context = RunContext(
