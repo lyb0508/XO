@@ -132,14 +132,19 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"{field} contains unsupported characters")
         return candidate
 
-    def _build_graph(model_override: Any = None):
-        from langgraph.checkpoint.memory import InMemorySaver
+    # One shared in-process checkpointer: /diagnoses/stream may interrupt on a
+    # thread, and POST /approvals/{thread_id} must resume that same thread.
+    # A per-call saver would lose the interrupt state between requests.
+    from langgraph.checkpoint.memory import InMemorySaver
 
+    graph_checkpointer = InMemorySaver()
+
+    def _build_graph(model_override: Any = None):
         active_model = model_override or model or create_chat_model(resolved_settings)
         return build_diagnosis_graph(
             active_model,
             structured_output_method=resolved_settings.structured_output_method,
-            checkpointer=InMemorySaver(),
+            checkpointer=graph_checkpointer,
             manual_store=manual_store,
             manual_top_k=resolved_settings.manual_retrieval_top_k,
             manual_min_score=resolved_settings.manual_retrieval_min_score,
@@ -232,8 +237,11 @@ def create_app(
             try:
                 for update in graph.stream(_graph_input(body), config=config, stream_mode="updates"):
                     for node_name, node_update in update.items():
+                        # In updates mode the interrupt arrives as a tuple of
+                        # Interrupt objects under the "__interrupt__" key.
                         if node_name == "__interrupt__":
-                            payload = node_update[0].value if isinstance(node_update, list) and node_update else {}
+                            container = node_update if isinstance(node_update, (list, tuple)) else []
+                            payload = container[0].value if container and hasattr(container[0], "value") else {}
                             yield _sse("approval_required", redact_payload(payload))
                             return
                         if isinstance(node_update, dict):

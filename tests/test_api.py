@@ -138,6 +138,43 @@ def test_approval_endpoint_rejects_invalid_decision(monkeypatch: pytest.MonkeyPa
     assert response.status_code == 422
 
 
+def test_stream_emits_approval_required_then_resume_via_approvals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """High-risk reports interrupt the stream; the decision resumes the run."""
+
+    model = GraphFakeChatModel(
+        plan_responses=[QueryPlan.model_validate(VIBRATION_PLAN)],
+        draft_responses=[_sufficient_draft("req-api-001", review=True)],
+    )
+    app = create_app(model=model, settings=_settings())
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        "/diagnoses/stream",
+        json={"question": "研判振动", "device_id": "PUMP-003", "request_id": "req-api-001", "thread_id": "stream-hr"},
+        headers=AUTH,
+    ) as response:
+        events = _parse_sse(response.iter_lines())
+    names = [event["event"] for event in events]
+    assert names[-1] == "approval_required"
+    payload = json.loads(events[-1]["data"])
+    assert payload["proposed_action"]["action_type"] == "schedule_maintenance"
+
+    resumed = client.post(
+        "/approvals/stream-hr",
+        json={
+            "decision": {"decision": "approved", "decided_by": "officer", "reason": "复核通过"},
+            "question": "研判振动",
+            "device_id": "PUMP-003",
+            "request_id": "req-api-001",
+        },
+        headers=AUTH,
+    )
+    assert resumed.status_code == 200
+    outcome = resumed.json()
+    assert outcome["approval"]["decision"] == "approved"
+    assert outcome["action_audit"]["status"] in {"executed", "already_executed"}
+
+
 def test_error_payloads_are_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
     model = GraphFakeChatModel(
         plan_responses=[QueryPlan.model_validate(VIBRATION_PLAN)],
