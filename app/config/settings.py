@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     embeddings_provider: Literal["deterministic", "ollama"] = "deterministic"
     embeddings_model: str = Field(default="nomic-embed-text", min_length=1, max_length=128)
     manual_retrieval_top_k: int = Field(default=3, ge=1, le=10)
+    # 0.0 accepts every non-negative cosine score. The calibration samples in
+    # tests/test_retrieval.py measured related queries at ~0.23-0.40 and
+    # unrelated ones at <=0.08 for the deterministic embedding on the mock
+    # corpus; recalibrate whenever the corpus or embeddings change.
     manual_retrieval_min_score: float = Field(default=0.0, ge=0.0, le=1.0)
 
     # Session memory keeps at most this many recent turns per session id in

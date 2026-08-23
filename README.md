@@ -63,4 +63,4 @@ python -m pytest
 - [`docs/phase3-persistence-approval.md`](docs/phase3-persistence-approval.md)：Checkpoint/Interrupt 审批流、幂等语义与线程隔离。
 - [`docs/phase4-retrieval-memory.md`](docs/phase4-retrieval-memory.md)：手册 RAG、阈值校准纪律与受控记忆。
 
-2026-08-23 验证记录包括 Python 3.13.12、`pip check`、`compileall app tests`，以及离线 160 项测试（另有 2 项 live 测试默认跳过）连续三次通过，稳态耗时约 `2.6s`；阶段 2/3/4 各有本地 Ollama live smoke 通过记录（含完整人工审批链路与台账落盘）。完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。
+2026-08-23 验证记录包括 Python 3.13.12、`pip check`、`compileall app tests`，以及离线 163 项测试（另有 2 项 live 测试默认跳过）连续三次通过，稳态耗时约 `2.6–3.1s`；阶段 2/3/4 各有本地 Ollama live smoke 通过记录（含完整人工审批链路与台账落盘）。完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。

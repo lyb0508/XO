@@ -97,6 +97,47 @@ def test_identical_queries_return_deterministic_order() -> None:
 
 
 @pytest.mark.unit
+def test_retrieval_boundary_contract() -> None:
+    store = ManualVectorStore(DeterministicCharacterEmbeddings())
+    store.ingest(SECTIONS)
+    assert store.retrieve("   ", device_id="PUMP-003") == []
+    assert store.retrieve("振动", device_id="PUMP-003", top_k=0) == []
+    assert store.retrieve("振动", device_id="PUMP-003", top_k=-1) == []
+    assert store.retrieve("振动", device_id="PUMP-003", top_k=99) is not None
+    assert len(store.retrieve("振动", device_id="PUMP-003", top_k=99)) <= len(SECTIONS)
+    assert store.retrieve("振动", device_id="PUMP-003", min_score=1.1) == []
+
+
+@pytest.mark.unit
+def test_zero_vector_query_returns_nothing() -> None:
+    class EmptyEmbeddings(DeterministicCharacterEmbeddings):
+        def embed_query(self, text: str) -> list[float]:
+            return [0.0] * self.dimensions
+
+    store = ManualVectorStore(EmptyEmbeddings())
+    store.ingest(SECTIONS)
+    assert store.retrieve("任意查询", device_id="PUMP-003", top_k=3) == []
+
+
+@pytest.mark.unit
+def test_score_ties_break_deterministically_by_doc_id() -> None:
+    from langchain_core.embeddings import Embeddings as _Embeddings
+
+    class ConstantEmbeddings(_Embeddings):
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in texts]
+
+        def embed_query(self, text: str) -> list[float]:
+            return [1.0, 0.0]
+
+    store = ManualVectorStore(ConstantEmbeddings())
+    store.ingest(list(reversed(SECTIONS)))
+    hits = store.retrieve("任何内容", device_id="PUMP-003", top_k=5)
+    doc_ids = [hit.doc_id for hit in hits]
+    assert doc_ids == sorted(doc_ids)
+
+
+@pytest.mark.unit
 def test_default_store_ingests_the_mock_manual() -> None:
     store = build_default_store(DeterministicCharacterEmbeddings())
     assert len(store) == len(MANUAL_SECTIONS)

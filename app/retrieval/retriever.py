@@ -7,7 +7,12 @@ from app.retrieval.store import ManualVectorStore, RetrievedChunk, build_default
 
 
 def create_manual_store(settings: Settings) -> ManualVectorStore:
-    """Build the configured manual store; construction performs no network I/O."""
+    """Build the configured manual store and ingest the mock corpus.
+
+    Building embeddings performs no network I/O, but ingesting the corpus
+    calls ``embed_documents`` once: with provider=ollama this contacts the
+    configured Ollama endpoint and fails loudly when it is unreachable.
+    """
 
     embeddings = _create_embeddings(settings)
     return build_default_store(embeddings)

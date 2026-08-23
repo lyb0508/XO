@@ -51,7 +51,11 @@ class ManualVectorStore:
         return len(self._chunks)
 
     def ingest(self, sections: list[Mapping[str, Any]]) -> int:
-        """Ingest manual sections; each must bind to one device and version."""
+        """Ingest manual sections; each must bind to one device and version.
+
+        Embedding runs before any state changes: a failing backend must not
+        leave chunks stored without their vectors.
+        """
 
         new_chunks = []
         for section in sections:
@@ -70,12 +74,11 @@ class ManualVectorStore:
                     "device_id": device_id,
                 }
             )
-        self._chunks.extend(new_chunks)
-        self._vectors.extend(
-            self._embeddings.embed_documents(
-                [f"{chunk['title']} {chunk['content']}" for chunk in new_chunks]
-            )
+        vectors = self._embeddings.embed_documents(
+            [f"{chunk['title']} {chunk['content']}" for chunk in new_chunks]
         )
+        self._chunks.extend(new_chunks)
+        self._vectors.extend(vectors)
         return len(new_chunks)
 
     def retrieve(
@@ -95,6 +98,8 @@ class ManualVectorStore:
         if not query.strip() or top_k < 1:
             return []
         query_vector = self._embeddings.embed_query(query)
+        if not any(query_vector):
+            return []  # a zero vector carries no directional information
         scored = [
             (_cosine(query_vector, vector), chunk)
             for vector, chunk in zip(self._vectors, self._chunks)

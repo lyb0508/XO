@@ -15,7 +15,7 @@ from app.observability.tracing import RunContext, TraceMetadata, redact_payload,
 from app.schemas.approval import ApprovalDecision
 from app.schemas.diagnostics import DiagnosisReport
 
-AGENT_VERSION = "phase3-approval"
+AGENT_VERSION = "phase4-retrieval-memory"
 DEFAULT_DEVICE_ID = "PUMP-003"
 MAX_APPROVAL_ROUNDS = 3
 
@@ -119,6 +119,9 @@ def main(argv: list[str] | None = None) -> int:
         args = _parser().parse_args(argv)
         if not args.question.strip():
             raise CliUsageError("question must not be empty")
+        # A blank session id must never reach the graph or the memory writer:
+        # normalizing here keeps the report and any side effects consistent.
+        args.session_id = (args.session_id or "").strip() or None
         settings = get_settings()
         context = RunContext(
             request_id=_identifier(args.request_id),
@@ -139,21 +142,24 @@ def main(argv: list[str] | None = None) -> int:
             from app.memory.session import SessionMemory
 
             session_memory = SessionMemory(max_turns=settings.session_memory_max_turns)
-        ledger = None
+        from app.memory.ledger import LongTermLedger
+
+        ledger = LongTermLedger(settings.memory_ledger_path)
+
         try:
-            from app.memory.ledger import LongTermLedger
+            from app.retrieval.retriever import create_manual_store
 
-            ledger = LongTermLedger(settings.memory_ledger_path)
-        except Exception:
-            ledger = None
-
-        from app.retrieval.retriever import create_manual_store
+            manual_store = create_manual_store(settings)
+        except Exception as error:
+            raise CliUsageError(
+                f"manual retrieval store is unavailable: {redact_payload(str(error))}"
+            ) from error
 
         graph = build_diagnosis_graph(
             model,
             structured_output_method=settings.structured_output_method,
             checkpointer=InMemorySaver(),
-            manual_store=create_manual_store(settings),
+            manual_store=manual_store,
             manual_top_k=settings.manual_retrieval_top_k,
             manual_min_score=settings.manual_retrieval_min_score,
             session_memory=session_memory,

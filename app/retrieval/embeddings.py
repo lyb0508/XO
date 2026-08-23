@@ -6,8 +6,9 @@ Two implementations share the standard LangChain ``Embeddings`` interface:
   into a fixed-width vector. It has no semantic quality at all and exists so
   offline tests can verify ranking, threshold, and metadata contracts without
   a model; it must never be presented as semantic search.
-* ``OllamaEmbeddings`` is built by the factory for live use. Construction
-  never performs network I/O.
+* ``OllamaEmbeddings`` is built by the factory for live use. Building the
+  object performs no network I/O; the first embedding call (ingestion or
+  query) contacts the configured Ollama endpoint.
 """
 
 from __future__ import annotations
