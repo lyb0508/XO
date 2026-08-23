@@ -51,6 +51,7 @@ python -m pytest
 - `app/models/`：Ollama/DeepSeek 模型工厂，不在构造时发起网络调用。
 - `app/tools/`：五个固定模拟数据的只读工具。
 - `app/retrieval/`：手册 RAG：embedding 工厂、进程内向量库、带引用元数据的检索。
+- `evaluations/`：LangSmith 评测：50 条固定数据集、确定性评测器、本地优先的实验运行器。
 - `app/memory/`：有界短期会话记忆与仅记录已批准动作的长期台账。
 - `app/graphs/`：LangGraph 编排：规划节点、并行 fan-out、Reducer 合并、条件路由、Checkpoint/Interrupt 人工审批与 fail-closed 分支。
 - `app/agents/`：证据注册表转换边界、振动门控与报告格式化（两阶段 Agent 入口保留）。
@@ -62,5 +63,6 @@ python -m pytest
 - [`docs/phase2-langgraph-orchestration.md`](docs/phase2-langgraph-orchestration.md)：LangGraph 编排设计、并行/Reducer 语义与 live 复盘。
 - [`docs/phase3-persistence-approval.md`](docs/phase3-persistence-approval.md)：Checkpoint/Interrupt 审批流、幂等语义与线程隔离。
 - [`docs/phase4-retrieval-memory.md`](docs/phase4-retrieval-memory.md)：手册 RAG、阈值校准纪律与受控记忆。
+- [`docs/phase5-evaluation.md`](docs/phase5-evaluation.md)：50 条固定评测集、指标基线与根因分析。
 
-2026-08-23 验证记录包括 Python 3.13.12、`pip check`、`compileall app tests`，以及离线 163 项测试（另有 2 项 live 测试默认跳过）连续三次通过，稳态耗时约 `2.6–3.1s`；阶段 2/3/4 各有本地 Ollama live smoke 通过记录（含完整人工审批链路与台账落盘）。完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。
+2026-08-23 验证记录包括 Python 3.13.12、`pip check`、`compileall app tests`，以及离线 169 项测试（另有 2 项 live 测试默认跳过）通过；阶段 2/3/4 各有本地 Ollama live smoke 通过记录（含完整人工审批链路与台账落盘）；阶段 5 完成 50 条 live 全量评测基线：工具选择 0.82 / 拒答 0.727 / 轨迹 0.86，三项最终目标指标未达标且差距已量化。完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。
