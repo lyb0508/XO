@@ -56,6 +56,7 @@ class GraphState(TypedDict):
     request_id: str
     device_id: str
     question: str
+    session_id: NotRequired[str]
 
     query_plan: NotRequired[dict[str, Any]]
     tool_payloads: NotRequired[Annotated[list[dict[str, Any]], merge_tool_payloads]]

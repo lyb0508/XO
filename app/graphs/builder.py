@@ -47,28 +47,52 @@ def build_diagnosis_graph(
     *,
     structured_output_method: str = "json_schema",
     checkpointer: BaseCheckpointSaver | None = None,
+    manual_store: Any = None,
+    manual_top_k: int = 3,
+    manual_min_score: float = 0.0,
+    session_memory: Any = None,
+    ledger: Any = None,
 ):
     """Compile the diagnosis graph around schema-bound planner/formatter calls.
 
     Passing a checkpointer additionally wires the human-approval branch; the
-    caller must then always provide ``configurable.thread_id``.
+    caller must then always provide ``configurable.thread_id``. A
+    ``manual_store`` switches the manual evidence node from keyword matching
+    to embedding retrieval. ``session_memory`` and ``ledger`` enable bounded
+    short-term recall and controlled long-term records respectively.
     """
 
     planner = _schema_bound(model, QueryPlan, structured_output_method)
     formatter = _schema_bound(model, DiagnosisDraft, structured_output_method)
 
     builder = StateGraph(GraphState)
-    builder.add_node("plan_queries", nodes.make_plan_queries(planner))
+    builder.add_node(
+        "plan_queries",
+        nodes.make_plan_queries(planner, session_memory=session_memory, ledger=ledger),
+    )
     builder.add_node("dispatch", nodes.dispatch)
     for node_name in set(routing.QUERY_NODE_BY_EVIDENCE_TYPE.values()):
-        builder.add_node(node_name, nodes.make_query_node(_tool_name_for(node_name)))
+        if node_name == "search_manual_docs" and manual_store is not None:
+            builder.add_node(
+                node_name,
+                nodes.make_manual_retrieval_node(
+                    manual_store,
+                    top_k=manual_top_k,
+                    min_score=manual_min_score,
+                ),
+            )
+        else:
+            builder.add_node(node_name, nodes.make_query_node(_tool_name_for(node_name)))
     builder.add_node("join_registry", nodes.join_registry)
     builder.add_node("format_report", nodes.make_format_report(formatter))
     builder.add_node("finalize_report", nodes.finalize_report)
     builder.add_node("fail_closed", nodes.fail_closed)
     builder.add_node("review_blocked", nodes.review_blocked)
     builder.add_node("approval_gate", nodes.approval_gate)
-    builder.add_node("execute_approved_action", nodes.execute_approved_action)
+    builder.add_node(
+        "execute_approved_action",
+        nodes.make_execute_approved_action(ledger=ledger),
+    )
     builder.add_node("record_rejection", nodes.record_rejection)
     builder.add_node("complete", lambda state: {})
 

@@ -13,6 +13,7 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+data/
 
 # Codex runtime state (not project configuration)
 /installation_id

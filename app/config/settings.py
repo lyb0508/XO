@@ -38,6 +38,19 @@ class Settings(BaseSettings):
     tool_run_limit: int = Field(default=8, ge=1, le=50)
     per_tool_run_limit: int = Field(default=2, ge=1, le=10)
 
+    # Manual retrieval. The default provider is the deterministic hash
+    # embedding so offline use needs no model; "ollama" enables live semantic
+    # retrieval with a locally pulled embedding model.
+    embeddings_provider: Literal["deterministic", "ollama"] = "deterministic"
+    embeddings_model: str = Field(default="nomic-embed-text", min_length=1, max_length=128)
+    manual_retrieval_top_k: int = Field(default=3, ge=1, le=10)
+    manual_retrieval_min_score: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    # Session memory keeps at most this many recent turns per session id in
+    # process memory; long-term records go to an append-only JSONL ledger.
+    session_memory_max_turns: int = Field(default=5, ge=1, le=50)
+    memory_ledger_path: str = Field(default="data/memory/approved_actions.jsonl", min_length=1, max_length=256)
+
     tracing_enabled: bool = False
     tracing_project: str = Field(
         default="industrial-diagnostic-agent-dev", min_length=1, max_length=128

@@ -44,11 +44,12 @@ def test_cli_prints_exactly_one_outcome_json_to_stdout_and_passes_structured_met
     monkeypatch.setattr(cli, "create_chat_model", lambda settings: object())
     received: dict[str, object] = {}
 
-    def build_stub(model, *, structured_output_method, checkpointer=None):
+    def build_stub(model, **kwargs):
         from types import SimpleNamespace
 
-        received["method"] = structured_output_method
-        assert checkpointer is not None, "the CLI must always run with a checkpointer"
+        received["method"] = kwargs["structured_output_method"]
+        assert kwargs.get("checkpointer") is not None, "the CLI must always run with a checkpointer"
+        assert kwargs.get("manual_store") is not None, "the CLI must enable manual retrieval"
         return SimpleNamespace(
             invoke=lambda state, config: {
                 "report": _report().model_dump(mode="json"),
@@ -82,7 +83,7 @@ def test_cli_fail_closed_branch_prints_redacted_error_to_stderr(monkeypatch, cap
     monkeypatch.setattr(
         cli,
         "build_diagnosis_graph",
-        lambda model, *, structured_output_method, checkpointer=None: SimpleNamespace(
+        lambda model, **kwargs: SimpleNamespace(
             invoke=lambda state, config: {
                 "report": None,
                 "error": "query_sensor_history: Authorization: Bearer top-secret",
@@ -113,7 +114,7 @@ def test_cli_approval_flow_approves_with_audit(monkeypatch, capsys) -> None:
     report_payload = _report().model_dump(mode="json")
     calls: list[object] = []
 
-    def build_stub(model, *, structured_output_method, checkpointer=None):
+    def build_stub(model, **kwargs):
         graph = SimpleNamespace()
         graph.invoke = lambda command, config: calls.append(command) or (
             {
@@ -153,7 +154,7 @@ def test_cli_modify_flow_rewrites_report_actions(monkeypatch, capsys) -> None:
     report_payload = _report().model_dump(mode="json")
     calls: list[object] = []
 
-    def build_stub(model, *, structured_output_method, checkpointer=None):
+    def build_stub(model, **kwargs):
         graph = SimpleNamespace()
 
         def invoke(command, config):
@@ -189,7 +190,7 @@ def test_cli_modify_flow_rewrites_report_actions(monkeypatch, capsys) -> None:
 def test_cli_eof_during_approval_fails_without_fabricating_a_decision(monkeypatch, capsys) -> None:
     from types import SimpleNamespace
 
-    def build_stub(model, *, structured_output_method, checkpointer=None):
+    def build_stub(model, **kwargs):
         return SimpleNamespace(
             invoke=lambda command, config: {
                 "__interrupt__": [SimpleNamespace(value={"proposed_action": {"action_type": "schedule_maintenance"}})]

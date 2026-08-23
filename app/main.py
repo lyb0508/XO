@@ -37,6 +37,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device-id", default=DEFAULT_DEVICE_ID, help="Mock device identifier.")
     parser.add_argument("--request-id", help="Optional safe request identifier; generated when omitted.")
     parser.add_argument("--thread-id", help="Checkpoint thread identifier; generated when omitted.")
+    parser.add_argument(
+        "--session",
+        dest="session_id",
+        help="Session identifier enabling bounded short-term recall for this run.",
+    )
     return parser
 
 
@@ -129,10 +134,30 @@ def main(argv: list[str] | None = None) -> int:
         model = create_chat_model(settings)
         from langgraph.checkpoint.memory import InMemorySaver
 
+        session_memory = None
+        if args.session_id:
+            from app.memory.session import SessionMemory
+
+            session_memory = SessionMemory(max_turns=settings.session_memory_max_turns)
+        ledger = None
+        try:
+            from app.memory.ledger import LongTermLedger
+
+            ledger = LongTermLedger(settings.memory_ledger_path)
+        except Exception:
+            ledger = None
+
+        from app.retrieval.retriever import create_manual_store
+
         graph = build_diagnosis_graph(
             model,
             structured_output_method=settings.structured_output_method,
             checkpointer=InMemorySaver(),
+            manual_store=create_manual_store(settings),
+            manual_top_k=settings.manual_retrieval_top_k,
+            manual_min_score=settings.manual_retrieval_min_score,
+            session_memory=session_memory,
+            ledger=ledger,
         )
         invoke_config = {
             "run_name": "diagnosis_graph",
@@ -140,21 +165,28 @@ def main(argv: list[str] | None = None) -> int:
             "recursion_limit": GRAPH_RECURSION_LIMIT,
             "configurable": {"thread_id": context.thread_id},
         }
+        graph_input = {
+            "request_id": context.request_id,
+            "device_id": args.device_id,
+            "question": args.question.strip(),
+        }
+        if args.session_id:
+            graph_input["session_id"] = args.session_id
         with tracing_run(settings, metadata):
-            result = _run_with_approval(
-                graph,
-                {
-                    "request_id": context.request_id,
-                    "device_id": args.device_id,
-                    "question": args.question.strip(),
-                },
-                invoke_config,
-            )
+            result = _run_with_approval(graph, graph_input, invoke_config)
         if result.get("error") or not result.get("report"):
             safe_message = redact_payload(str(result.get("error", "diagnosis produced no report")))
             print(json.dumps({"error": safe_message}, ensure_ascii=False), file=sys.stderr)
             return 1
         report = DiagnosisReport.model_validate(result["report"])
+        if session_memory is not None:
+            session_memory.append_turn(
+                args.session_id,
+                question=args.question.strip(),
+                device_id=args.device_id,
+                risk_level=report.risk_level,
+                summary=report.summary,
+            )
         outcome = {
             "report": report.model_dump(mode="json"),
             "approval": result.get("approval"),
