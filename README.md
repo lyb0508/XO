@@ -65,4 +65,4 @@ python -m pytest
 - [`docs/phase4-retrieval-memory.md`](docs/phase4-retrieval-memory.md)：手册 RAG、阈值校准纪律与受控记忆。
 - [`docs/phase5-evaluation.md`](docs/phase5-evaluation.md)：50 条固定评测集、指标基线与根因分析。
 
-2026-08-23 验证记录包括 Python 3.13.12、`pip check`、`compileall app tests`，以及离线 169 项测试（另有 2 项 live 测试默认跳过）通过；阶段 2/3/4 各有本地 Ollama live smoke 通过记录（含完整人工审批链路与台账落盘）；阶段 5 完成 50 条 live 全量评测基线：工具选择 0.82 / 拒答 0.727 / 轨迹 0.86，三项最终目标指标未达标且差距已量化。完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。
+2026-08-23 验证记录包括 Python 3.13.12、`pip check`、`compileall app tests`，以及离线 170 项测试（另有 2 项 live 测试默认跳过）通过；阶段 2/3/4 各有本地 Ollama live smoke 通过记录（含完整人工审批链路与台账落盘）；阶段 5 完成 50 条 live 全量评测基线：工具选择 0.81 / 拒答 0.727 / 轨迹 0.84，三项最终目标指标未达标且差距已量化。完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。

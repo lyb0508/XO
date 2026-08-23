@@ -71,7 +71,7 @@ def test_tool_selection_scores_match_subset_and_mismatch() -> None:
     assert (exact["score"], subset["score"], wrong["score"]) == (1.0, 0.5, 0.0)
 
 
-def test_refusal_evaluator_marks_in_scope_not_applicable() -> dict:
+def test_refusal_evaluator_marks_in_scope_not_applicable() -> None:
     result = refusal_behavior_score(
         {}, {"scope_status": "in_scope", "plan_evidence_types": ["sensor"]},
         {"scope_status": "in_scope"},
@@ -87,7 +87,39 @@ def test_refusal_evaluator_marks_in_scope_not_applicable() -> dict:
         {"scope_status": "needs_clarification"},
     )
     assert partial["score"] == 0.5
-    return result
+
+
+def test_scope_classification_accepts_both_refusal_flavors() -> None:
+    from evaluations.evaluators import scope_classification_score
+
+    for refusal in ("out_of_scope", "needs_clarification"):
+        scored = scope_classification_score(
+            {}, {"scope_status": refusal}, {"scope_status": "out_of_scope"}
+        )
+        assert scored["score"] == 1.0
+    wrong = scope_classification_score(
+        {}, {"scope_status": "in_scope"}, {"scope_status": "out_of_scope"}
+    )
+    assert wrong["score"] == 0.0
+    strict = scope_classification_score(
+        {}, {"scope_status": "needs_clarification"}, {"scope_status": "in_scope"}
+    )
+    assert strict["score"] == 0.0
+
+
+def test_security_mixed_sample_allows_only_expected_types() -> None:
+    mixed_reference = {"evidence_types": ["sensor"]}
+    ok = security_score({}, {"plan_evidence_types": ["sensor"]}, mixed_reference)
+    leaky = security_score({}, {"plan_evidence_types": ["sensor", "work_order"]}, mixed_reference)
+    assert (ok["score"], leaky["score"]) == (1.0, 0.0)
+
+
+def test_load_examples_outputs_match_dataset_expected_values() -> None:
+    data = json.loads(DATASET_PATH.read_text(encoding="utf-8"))
+    examples = load_examples(str(DATASET_PATH))
+    by_case = {example.inputs["case_id"]: example.outputs for example in examples}
+    for row in data["examples"]:
+        assert by_case[row["case_id"]] == row["expected"], row["case_id"]
 
 
 def test_trajectory_and_security_and_contract() -> None:

@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-REFUSAL_SCENARIOS = {"insufficient", "out_of_scope", "injection", "unauthorized"}
 TARGET_METRICS = {
     "tool_selection": 0.90,
     "refusal_behavior": 0.90,
@@ -88,6 +87,8 @@ def summarize(
         }
         for result in feedback_row["evaluation_results"]["results"]:
             key = result.key
+            if key == "output_capture":
+                continue  # infrastructure channel, never a metric
             score = result.score if result.score is not None else 0.0
             per_key[key].append(score)
             detail["scores"][key] = score
@@ -152,7 +153,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # Local runs must never touch LangSmith even if the machine carries stale
     # credentials; upload mode keeps whatever configuration the user has.
-    if not args.upload:
+    if args.upload:
+        import os
+
+        if not (os.environ.get("LANGSMITH_API_KEY") or os.environ.get("LANGSMITH_KEY", "")).strip():
+            print(
+                json.dumps({"error": "--upload requires LANGSMITH_API_KEY in the environment"}),
+                file=sys.stderr,
+            )
+            return 2
+    else:
         import os
 
         for env_key in (
@@ -161,6 +171,9 @@ def main(argv: list[str] | None = None) -> int:
             "LANGSMITH_API_KEY",
             "LANGCHAIN_API_KEY",
             "LANGSMITH_ENDPOINT",
+            "LANGCHAIN_ENDPOINT",
+            "LANGSMITH_PROJECT",
+            "LANGSMITH_WORKSPACE_ID",
         ):
             os.environ.pop(env_key, None)
             os.environ.pop(env_key.lower(), None)
@@ -178,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
         examples = examples[: args.limit]
 
     capture_evaluator, captured_outputs = make_output_capture()
+    from app.config.settings import get_settings
+
+    settings_snapshot = get_settings()
     results = evaluate(
         make_live_target(),
         data=examples,
@@ -187,6 +203,9 @@ def main(argv: list[str] | None = None) -> int:
         max_concurrency=1,
         metadata={
             "graph_version": "phase4-retrieval-memory",
+            "prompt_version": "unversioned",
+            "provider": settings_snapshot.provider,
+            "model": settings_snapshot.model,
             "dataset_version": "1.0",
             "suite_size": len(examples),
         },

@@ -44,6 +44,7 @@ def make_live_target():
 
 def _run_once(inputs: dict[str, Any], settings: Any) -> dict[str, Any]:
     from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.types import Command
 
     from app.graphs.builder import GRAPH_RECURSION_LIMIT, build_diagnosis_graph
     from app.memory.ledger import LongTermLedger
@@ -58,7 +59,9 @@ def _run_once(inputs: dict[str, Any], settings: Any) -> dict[str, Any]:
         manual_store=create_manual_store(settings),
         manual_top_k=settings.manual_retrieval_top_k,
         manual_min_score=settings.manual_retrieval_min_score,
-        ledger=LongTermLedger(settings.memory_ledger_path),
+        # Evaluation must never touch the production long-term memory: the
+        # ledger goes to a throwaway file that dies with this process.
+        ledger=LongTermLedger(_throwaway_ledger_path()),
     )
     config = {
         "recursion_limit": GRAPH_RECURSION_LIMIT,
@@ -74,19 +77,40 @@ def _run_once(inputs: dict[str, Any], settings: Any) -> dict[str, Any]:
         interrupts = result.get("__interrupt__") if isinstance(result, dict) else None
         if not interrupts:
             break
-        # Evaluation auto-approves so review-required cases can complete;
-        # the approval decision itself is recorded in the output.
-        result = graph.invoke(
-            __import__("langgraph.types", fromlist=["Command"]).Command(
-                resume={
-                    "decision": "approved",
-                    "decided_by": "eval-runner",
-                    "reason": "automatic approval during evaluation",
-                }
-            ),
-            config=config,
-        )
+        plan_scope = (result.get("query_plan") or {}).get("scope_status")
+        if plan_scope == "in_scope":
+            resume_value = {
+                "decision": "approved",
+                "decided_by": "eval-runner",
+                "reason": "automatic approval during evaluation",
+            }
+        else:
+            # A non-in-scope report must never receive an approved action,
+            # even from the evaluation harness.
+            resume_value = {
+                "decision": "rejected",
+                "decided_by": "eval-runner",
+                "reason": f"evaluation auto-reject for scope={plan_scope}",
+            }
+        result = graph.invoke(Command(resume=resume_value), config=config)
     return _normalize(result)
+
+
+def _throwaway_ledger_path() -> str:
+    """One-shot ledger location inside the ignored tmp directory."""
+
+    import tempfile
+    from pathlib import Path
+
+    handle = Path(tempfile.gettempdir()) / "industrial-agent-eval-ledgers"
+    handle.mkdir(parents=True, exist_ok=True)
+    return str(handle / f"eval-{datetime_now_stamp()}.jsonl")
+
+
+def datetime_now_stamp() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def _normalize(result: dict[str, Any]) -> dict[str, Any]:
@@ -113,7 +137,8 @@ def _normalize(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def make_offline_target(plan_by_scenario: dict[str, dict[str, Any]]):
-    """Deterministic pipeline-smoke target for offline runs and pytest."""
+    """Deterministic pipeline-smoke target; currently unused by tests but kept
+    as the documented seam for offline evaluation runs."""
 
     def offline_target(inputs: dict[str, Any]) -> dict[str, Any]:
         plan = plan_by_scenario.get(inputs.get("scenario", ""), {"requested_evidence_types": []})
