@@ -46,7 +46,8 @@ live Ollama 运行中 qwen2.5:7b 在未请求 manual 证据的计划里多填了
 
 以下为 2026-08-23 实际执行的验证：
 
-- 默认离线套件 142 项收集：140 通过，2 项 live 测试默认跳过；连续三次稳定（约 2.3–2.5 秒）。新增覆盖：三种决策的 Schema 形状、幂等工具语义、approve/modified/reject 三条图级路径、无复核直通路径、共享 checkpointer 下的线程隔离、CLI 交互审批与 EOF 不伪造决策。
+- 默认离线套件 146 项收集：144 通过，2 项 live 测试默认跳过；连续三次稳定（约 2.4 秒）。新增覆盖：三种决策的 Schema 形状、幂等工具与节点守卫双层防重放、approve/modified/reject 三条图级路径、无复核直通路径、无 checkpointer 时 review_required 报告 fail closed、共享 checkpointer 下的线程隔离、CLI approve/modify 交互与 EOF 不伪造决策。
+- 第一轮独立只读审查（PARTIAL）：4 项 P2 全部关闭（modified_actions 上限对齐报告契约、幂等重放节点级测试、CLI modify 流程测试、无 checkpointer 静默路径改为 fail closed）；5 项 P3 一并修复（幂等 ledger 加锁、state 注释修正、fake 模型死字段删除、ledger 清理改 autouse fixture、rejected 测试直查 ledger）。延期 1 项 P3：跨测试文件共享常量移至 conftest fixtures（当前无顺序依赖，收益低）。
 - live Ollama 全链路通过一次：high 风险报告触发 interrupt，管道注入 approve 后 `action_audit.status=executed`、票据 `MNT-live-p3-smoke-005` 生成；另有一次 out-of-scope 判定未触发审批（合法）与一次计划解析失败（已修复并复盘）。
 - 未验证：跨进程持久化恢复、DeepSeek provider、远端 LangSmith 上传、并发多线程同时 resume 的竞争行为。
 

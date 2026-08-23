@@ -229,6 +229,18 @@ def fail_closed(state: Mapping[str, Any]) -> dict[str, Any]:
     return {"report": None, "error": errors or "diagnosis failed without a specific error"}
 
 
+def review_blocked(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Fail closed when review is required but no checkpointer can back an interrupt."""
+
+    return {
+        "report": None,
+        "error": (
+            "human review is required but the graph was compiled without a "
+            "checkpointer; recompile with a checkpointer to enable approval"
+        ),
+    }
+
+
 def approval_gate(state: Mapping[str, Any]) -> Command[Literal["record_rejection", "execute_approved_action"]]:
     """Pause for a structured human decision before any controlled side effect.
 

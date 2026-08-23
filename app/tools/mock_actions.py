@@ -7,10 +7,14 @@ rejection semantics can be exercised end to end before any real integration.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 _ACTION_TYPE = "schedule_maintenance"
 _EXECUTION_LEDGER: dict[tuple[str, str], dict[str, Any]] = {}
+# LangGraph executes node work on background threads even for sync invoke, so
+# guard the process-wide ledger against concurrent check-and-set windows.
+_LEDGER_LOCK = threading.Lock()
 
 
 def execute_maintenance_action(request_id: str, device_id: str) -> dict[str, Any]:
@@ -26,27 +30,29 @@ def execute_maintenance_action(request_id: str, device_id: str) -> dict[str, Any
     if not device_id.strip():
         raise ValueError("device_id must not be empty")
     key = (_ACTION_TYPE, request_id)
-    previous = _EXECUTION_LEDGER.get(key)
-    if previous is not None:
-        return {
-            "status": "already_executed",
-            "ticket_id": previous["ticket_id"],
+    with _LEDGER_LOCK:
+        previous = _EXECUTION_LEDGER.get(key)
+        if previous is not None:
+            return {
+                "status": "already_executed",
+                "ticket_id": previous["ticket_id"],
+                "action_type": _ACTION_TYPE,
+                "request_id": request_id,
+                "device_id": previous["device_id"],
+            }
+        record = {
+            "status": "executed",
+            "ticket_id": f"MNT-{request_id}",
             "action_type": _ACTION_TYPE,
             "request_id": request_id,
-            "device_id": previous["device_id"],
+            "device_id": device_id,
         }
-    record = {
-        "status": "executed",
-        "ticket_id": f"MNT-{request_id}",
-        "action_type": _ACTION_TYPE,
-        "request_id": request_id,
-        "device_id": device_id,
-    }
-    _EXECUTION_LEDGER[key] = record
+        _EXECUTION_LEDGER[key] = record
     return dict(record)
 
 
 def reset_execution_ledger() -> None:
     """Test-only cleanup so unit tests never observe each other's tickets."""
 
-    _EXECUTION_LEDGER.clear()
+    with _LEDGER_LOCK:
+        _EXECUTION_LEDGER.clear()

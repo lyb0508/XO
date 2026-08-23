@@ -32,7 +32,9 @@ class ApprovalDecision(StrictModel):
     decision: Literal["approved", "modified", "rejected"]
     decided_by: str = Field(min_length=1, max_length=128)
     reason: str = Field(min_length=1, max_length=400)
-    modified_actions: list[str] | None = None
+    # Aligned with DiagnosisReport.recommended_actions so a modified decision
+    # can never produce a report that fails final validation.
+    modified_actions: list[str] | None = Field(default=None, max_length=8)
 
     @field_validator("decided_by")
     @classmethod

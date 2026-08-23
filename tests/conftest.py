@@ -138,13 +138,12 @@ class GraphFakeChatModel(BaseChatModel):
     """Deterministic offline stand-in exposing two schema-bound invokables.
 
     The raw model raises if called directly: the graph must only ever reach the
-    model through its two structured wrappers.
+    model through its two structured wrappers. Call counters live on the
+    ``_planner``/``_formatter`` bound objects (``calls``).
     """
 
     plan_responses: list[Any]
     draft_responses: list[Any]
-    planner_calls: int = 0
-    formatter_calls: int = 0
 
     _planner: _ScriptedBound | None = PrivateAttr(default=None)
     _formatter: _ScriptedBound | None = PrivateAttr(default=None)

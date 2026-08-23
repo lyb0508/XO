@@ -12,9 +12,21 @@ from conftest import GraphFakeChatModel
 from test_graph_flow import OFF_TOPIC_PLAN, VIBRATION_PLAN, _sufficient_draft
 
 from app.graphs.builder import GRAPH_RECURSION_LIMIT, build_diagnosis_graph
+from app.graphs.nodes import execute_approved_action
 from app.schemas.approval import ApprovalDecision
 from app.schemas.query_plan import QueryPlan
-from app.tools.mock_actions import execute_maintenance_action, reset_execution_ledger
+from app.tools.mock_actions import (
+    execute_maintenance_action,
+    reset_execution_ledger,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_ledger():
+    reset_execution_ledger()
+    yield
+    reset_execution_ledger()
+
 
 THREAD_CONFIG = {"configurable": {"thread_id": "approval-thread-1"}, "recursion_limit": GRAPH_RECURSION_LIMIT}
 
@@ -78,7 +90,6 @@ def test_decided_by_is_restricted_to_safe_characters() -> None:
 
 @pytest.mark.unit
 def test_maintenance_action_is_idempotent_per_request() -> None:
-    reset_execution_ledger()
     first = execute_maintenance_action("request-idem-001", "PUMP-003")
     second = execute_maintenance_action("request-idem-001", "PUMP-003")
     assert first["status"] == "executed"
@@ -86,7 +97,33 @@ def test_maintenance_action_is_idempotent_per_request() -> None:
     assert first["ticket_id"] == second["ticket_id"]
     other = execute_maintenance_action("request-idem-002", "PUMP-003")
     assert other["status"] == "executed" and other["ticket_id"] != first["ticket_id"]
-    reset_execution_ledger()
+
+
+@pytest.mark.unit
+def test_execute_node_skips_when_audit_already_exists() -> None:
+    state = {
+        "request_id": "request-replay-001",
+        "device_id": "PUMP-003",
+        "approval": {"decision": "approved", "decided_by": "officer"},
+        "action_audit": {"status": "executed", "ticket_id": "MNT-existing"},
+    }
+    assert execute_approved_action(state) == {}
+    from app.tools.mock_actions import _EXECUTION_LEDGER
+
+    assert ("schedule_maintenance", "request-replay-001") not in _EXECUTION_LEDGER
+
+
+@pytest.mark.unit
+def test_execute_node_reports_already_executed_on_ledger_hit() -> None:
+    execute_maintenance_action("request-replay-002", "PUMP-003")
+    state = {
+        "request_id": "request-replay-002",
+        "device_id": "PUMP-003",
+        "approval": {"decision": "approved", "decided_by": "officer"},
+    }
+    audit = execute_approved_action(state)["action_audit"]
+    assert audit["status"] == "already_executed"
+    assert audit["ticket_id"] == "MNT-request-replay-002"
 
 
 # --- graph-level approval flows --------------------------------------------
@@ -94,10 +131,9 @@ def test_maintenance_action_is_idempotent_per_request() -> None:
 
 @pytest.mark.unit
 def test_high_risk_report_interrupts_then_approves_and_executes() -> None:
-    reset_execution_ledger()
     model = GraphFakeChatModel(
         plan_responses=[QueryPlan.model_validate(VIBRATION_PLAN)],
-        draft_responses=[_sufficient_draft("request-approval-001")],
+        draft_responses=[_sufficient_draft("request-approval-001", review=True)],
     )
     graph = _build(model)
     result = _invoke(graph)
@@ -110,15 +146,13 @@ def test_high_risk_report_interrupts_then_approves_and_executes() -> None:
     audit = resumed["action_audit"]
     assert audit["status"] == "executed" and audit["ticket_id"] == "MNT-request-approval-001"
     assert resumed["approval"]["decided_by"] == "duty-officer"
-    reset_execution_ledger()
 
 
 @pytest.mark.unit
 def test_modified_decision_updates_report_actions_before_execution() -> None:
-    reset_execution_ledger()
     model = GraphFakeChatModel(
         plan_responses=[QueryPlan.model_validate(VIBRATION_PLAN)],
-        draft_responses=[_sufficient_draft("request-approval-001")],
+        draft_responses=[_sufficient_draft("request-approval-001", review=True)],
     )
     graph = _build(model)
     _invoke(graph)
@@ -126,21 +160,22 @@ def test_modified_decision_updates_report_actions_before_execution() -> None:
     resumed = graph.invoke(Command(resume=revised), config=THREAD_CONFIG)
     assert resumed["report"]["recommended_actions"] == ["先复测振动，再由值班负责人决定停机。"]
     assert resumed["action_audit"]["status"] == "executed"
-    reset_execution_ledger()
 
 
 @pytest.mark.unit
 def test_rejected_decision_records_audit_without_side_effect() -> None:
     model = GraphFakeChatModel(
         plan_responses=[QueryPlan.model_validate(VIBRATION_PLAN)],
-        draft_responses=[_sufficient_draft("request-approval-001")],
+        draft_responses=[_sufficient_draft("request-approval-001", review=True)],
     )
     graph = _build(model)
     _invoke(graph)
     resumed = graph.invoke(Command(resume=_decision("rejected")), config=THREAD_CONFIG)
     audit = resumed["action_audit"]
     assert audit["status"] == "rejected" and audit["ticket_id"] is None
-    reset_execution_ledger()
+    from app.tools.mock_actions import _EXECUTION_LEDGER
+
+    assert _EXECUTION_LEDGER == {}, "a rejected decision must leave no execution record"
 
 
 @pytest.mark.unit
@@ -167,10 +202,9 @@ def test_no_review_path_completes_without_interrupt() -> None:
 
 @pytest.mark.unit
 def test_threads_are_isolated_under_a_shared_checkpointer() -> None:
-    reset_execution_ledger()
     model = GraphFakeChatModel(
         plan_responses=[QueryPlan.model_validate(VIBRATION_PLAN)],
-        draft_responses=[_sufficient_draft("req-shared")],
+        draft_responses=[_sufficient_draft("req-shared", review=True)],
     )
     graph = _build(model)
     config_a = {"configurable": {"thread_id": "thread-a"}, "recursion_limit": GRAPH_RECURSION_LIMIT}
@@ -185,4 +219,3 @@ def test_threads_are_isolated_under_a_shared_checkpointer() -> None:
     assert approved["report"]["request_id"] == "req-shared"
     assert rejected["action_audit"]["status"] == "rejected"
     assert rejected["report"]["request_id"] == "req-shared"
-    reset_execution_ledger()

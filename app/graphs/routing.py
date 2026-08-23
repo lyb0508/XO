@@ -52,3 +52,10 @@ def route_after_finalize(state: Mapping[str, Any]) -> str:
 
     report = state.get("report") or {}
     return "approval_gate" if report.get("requires_human_review") else "complete"
+
+
+def route_after_finalize_without_checkpointer(state: Mapping[str, Any]) -> str:
+    """Fail closed when review is required but no persistence can back an interrupt."""
+
+    report = state.get("report") or {}
+    return "review_blocked" if report.get("requires_human_review") else "complete"

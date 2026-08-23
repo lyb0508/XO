@@ -147,6 +147,45 @@ def test_cli_approval_flow_approves_with_audit(monkeypatch, capsys) -> None:
     assert outcome["action_audit"]["ticket_id"] == "MNT-request-001"
 
 
+def test_cli_modify_flow_rewrites_report_actions(monkeypatch, capsys) -> None:
+    from types import SimpleNamespace
+
+    report_payload = _report().model_dump(mode="json")
+    calls: list[object] = []
+
+    def build_stub(model, *, structured_output_method, checkpointer=None):
+        graph = SimpleNamespace()
+
+        def invoke(command, config):
+            calls.append(command)
+            if len(calls) == 1:
+                return {
+                    "__interrupt__": [SimpleNamespace(value={"proposed_action": {"action_type": "schedule_maintenance"}})]
+                }
+            assert command.resume["decision"] == "modified"
+            return {
+                "report": {**report_payload, "recommended_actions": ["复测后再定检修。"]},
+                "approval": command.resume,
+                "action_audit": {"status": "executed", "ticket_id": "MNT-request-001"},
+            }
+
+        graph.invoke = invoke
+        return graph
+
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(_env_file=None, tracing_enabled=False))
+    monkeypatch.setattr(cli, "create_chat_model", lambda settings: object())
+    monkeypatch.setattr(cli, "build_diagnosis_graph", build_stub)
+    monkeypatch.setattr("sys.stdin", io.StringIO("modify\nofficer-2\n按复测结果决定。\n复测振动。\n\n"))
+
+    exit_code = cli.main(["--question", "研判振动", "--request-id", "request-001"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    outcome = json.loads(captured.out)
+    assert outcome["approval"]["modified_actions"] == ["复测振动。"]
+    assert outcome["report"]["recommended_actions"] == ["复测后再定检修。"]
+
+
 def test_cli_eof_during_approval_fails_without_fabricating_a_decision(monkeypatch, capsys) -> None:
     from types import SimpleNamespace
 

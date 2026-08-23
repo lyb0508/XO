@@ -60,4 +60,4 @@ python -m pytest
 - [`docs/phase2-langgraph-orchestration.md`](docs/phase2-langgraph-orchestration.md)：LangGraph 编排设计、并行/Reducer 语义与 live 复盘。
 - [`docs/phase3-persistence-approval.md`](docs/phase3-persistence-approval.md)：Checkpoint/Interrupt 审批流、幂等语义与线程隔离。
 
-2026-08-23 验证记录包括 Python 3.13.12、`pip check`、`compileall app tests`，以及离线 140 项测试（另有 2 项 live 测试默认跳过）连续三次通过，稳态耗时约 `2.3–2.5s`；阶段 2/3 各有本地 Ollama live smoke 通过记录（含一次完整人工审批链路）。完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。
+2026-08-23 验证记录包括 Python 3.13.12、`pip check`、`compileall app tests`，以及离线 144 项测试（另有 2 项 live 测试默认跳过）连续三次通过，稳态耗时约 `2.4s`；阶段 2/3 各有本地 Ollama live smoke 通过记录（含一次完整人工审批链路）。完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。

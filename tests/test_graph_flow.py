@@ -51,12 +51,15 @@ INSUFFICIENT_DRAFT = {
 }
 
 
-def _sufficient_draft(request_id: str = "request-graph-001") -> dict[str, Any]:
+def _sufficient_draft(request_id: str = "request-graph-001", *, review: bool = False) -> dict[str, Any]:
+    # Without a checkpointer the graph fails closed on review-required reports,
+    # so plain flow tests use a medium-risk draft; approval tests opt into the
+    # high-risk variant explicitly.
     return {
         "request_id": request_id,
         "device_id": "PUMP-003",
         "scope_status": "in_scope",
-        "risk_level": "high",
+        "risk_level": "high" if review else "medium",
         "summary": "振动持续超限，需要现场复核。",
         "evidence_sufficient": True,
         "likely_causes": [
@@ -68,7 +71,7 @@ def _sufficient_draft(request_id: str = "request-graph-001") -> dict[str, Any]:
         ],
         "evidence_ids": [*SENSOR_IDS, DEVICE_ID],
         "recommended_actions": ["安排现场复核并记录复测结果。"],
-        "requires_human_review": True,
+        "requires_human_review": review,
         "limitations": [],
     }
 
@@ -117,7 +120,26 @@ def test_vibration_flow_fans_out_formats_and_gates() -> None:
     selected_ids = {item["evidence_id"] for item in report["evidence"]}
     assert set(SENSOR_IDS).issubset(selected_ids) and DEVICE_ID in selected_ids
     assert report["request_id"] == "request-graph-001"
-    assert report["risk_level"] == "high" and report["requires_human_review"] is True
+    assert report["risk_level"] == "medium" and report["requires_human_review"] is False
+
+
+@pytest.mark.unit
+def test_review_required_report_fails_closed_without_checkpointer() -> None:
+    model = GraphFakeChatModel(
+        plan_responses=[QueryPlan.model_validate(VIBRATION_PLAN)],
+        draft_responses=[_sufficient_draft(review=True)],
+    )
+    graph = build_diagnosis_graph(model, structured_output_method="json_schema")
+    result = graph.invoke(
+        {
+            "request_id": "request-graph-001",
+            "device_id": "PUMP-003",
+            "question": "研判振动。",
+        },
+        config={"recursion_limit": GRAPH_RECURSION_LIMIT},
+    )
+    assert result["report"] is None
+    assert "without a checkpointer" in result["error"]
 
 
 @pytest.mark.unit

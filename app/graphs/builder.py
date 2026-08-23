@@ -66,6 +66,7 @@ def build_diagnosis_graph(
     builder.add_node("format_report", nodes.make_format_report(formatter))
     builder.add_node("finalize_report", nodes.finalize_report)
     builder.add_node("fail_closed", nodes.fail_closed)
+    builder.add_node("review_blocked", nodes.review_blocked)
     builder.add_node("approval_gate", nodes.approval_gate)
     builder.add_node("execute_approved_action", nodes.execute_approved_action)
     builder.add_node("record_rejection", nodes.record_rejection)
@@ -87,7 +88,13 @@ def build_diagnosis_graph(
     )
     builder.add_edge("format_report", "finalize_report")
     if checkpointer is None:
-        builder.add_edge("finalize_report", "complete")
+        # Without persistence an interrupt could never be resumed, so a
+        # review-required report fails closed instead of silently completing.
+        builder.add_conditional_edges(
+            "finalize_report",
+            routing.route_after_finalize_without_checkpointer,
+            {"review_blocked": "review_blocked", "complete": "complete"},
+        )
         builder.add_edge("complete", END)
     else:
         builder.add_conditional_edges(

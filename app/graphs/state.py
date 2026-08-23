@@ -66,8 +66,9 @@ class GraphState(TypedDict):
     report: NotRequired[dict[str, Any] | None]
     error: NotRequired[str]
 
-    # Phase-three human-in-the-loop fields. Each key has exactly one writer
-    # node, so no reducer is needed.
+    # Phase-three human-in-the-loop fields. Each key is written by exactly
+    # one node per execution path (the two audit writers are on mutually
+    # exclusive branches), so no reducer is needed.
     proposed_action: NotRequired[dict[str, Any]]
     approval: NotRequired[dict[str, Any]]
     action_audit: NotRequired[dict[str, Any]]
