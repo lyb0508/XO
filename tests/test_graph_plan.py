@@ -70,19 +70,27 @@ def test_window_must_be_ordered_and_timezone_aware() -> None:
 
 
 @pytest.mark.unit
-def test_sensor_requests_require_metrics_and_metric_needs_sensor() -> None:
+def test_sensor_requests_require_metrics() -> None:
     with pytest.raises(ValidationError, match="at least one metric"):
         QueryPlan.model_validate(_plan(metrics=[]))
-    with pytest.raises(ValidationError, match="only allowed when sensor"):
-        QueryPlan.model_validate(_plan(requested_evidence_types=["device"], metrics=["vibration_mm_s"]))
 
 
 @pytest.mark.unit
-def test_manual_query_binding() -> None:
+def test_manual_query_required_for_manual_evidence() -> None:
     with pytest.raises(ValidationError, match="manual_query"):
         QueryPlan.model_validate(_plan(requested_evidence_types=["manual"], manual_query=None))
-    with pytest.raises(ValidationError, match="manual_query is only allowed"):
-        QueryPlan.model_validate(_plan(manual_query="轴承"))
+
+
+@pytest.mark.unit
+def test_extra_fields_for_unrequested_types_are_tolerated_and_ignored_by_the_program() -> None:
+    # Live small models sometimes emit fields for unrequested evidence types.
+    # The plan accepts them; fan-out is driven solely by requested_evidence_types.
+    plan = QueryPlan.model_validate(_plan(manual_query="轴承"))
+    assert plan.manual_query == "轴承" and "manual" not in plan.requested_evidence_types
+    sensor_only = QueryPlan.model_validate(
+        _plan(requested_evidence_types=["device"], metrics=[], manual_query=None)
+    )
+    assert sensor_only.requested_evidence_types == ["device"]
 
 
 @pytest.mark.unit

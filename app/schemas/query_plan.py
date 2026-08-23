@@ -64,13 +64,8 @@ class QueryPlan(StrictModel):
                 raise ValueError("an in-scope plan must name a device_id")
             if not self.requested_evidence_types:
                 raise ValueError("an in-scope plan must request at least one evidence type")
-        else:
-            if not self.requested_evidence_types:
-                pass
-            else:
-                raise ValueError(
-                    f"a {self.scope_status} plan must not request evidence types"
-                )
+        elif self.requested_evidence_types:
+            raise ValueError(f"a {self.scope_status} plan must not request evidence types")
         timed = [value for value in self.requested_evidence_types if value in TIMED_EVIDENCE_TYPES]
         if timed:
             missing_window = (
@@ -82,14 +77,12 @@ class QueryPlan(StrictModel):
                 raise ValueError(missing_window)
             if self.start_at >= self.end_at:
                 raise ValueError("start_at must be before end_at")
-        sensor_requested = "sensor" in self.requested_evidence_types
-        if sensor_requested and not self.metrics:
+        # Forward requirements are strict, but extra fields for unrequested
+        # evidence types are tolerated: the program only fans out per
+        # requested_evidence_types and never consumes the rest, so rejecting
+        # them here would only turn harmless model verbosity into a failure.
+        if "sensor" in self.requested_evidence_types and not self.metrics:
             raise ValueError("a plan requesting sensor evidence must list at least one metric")
-        if not sensor_requested and self.metrics:
-            raise ValueError("metrics are only allowed when sensor evidence is requested")
-        manual_requested = "manual" in self.requested_evidence_types
-        if manual_requested and not (self.manual_query and self.manual_query.strip()):
+        if "manual" in self.requested_evidence_types and not (self.manual_query and self.manual_query.strip()):
             raise ValueError("a plan requesting manual evidence must provide manual_query")
-        if not manual_requested and self.manual_query is not None:
-            raise ValueError("manual_query is only allowed when manual evidence is requested")
         return self

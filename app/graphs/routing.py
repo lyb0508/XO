@@ -45,3 +45,10 @@ def route_after_join(state: Mapping[str, Any]) -> str:
     """Fail closed when any tool error or canonical conflict remains unresolved."""
 
     return "fail_closed" if state.get("unresolved_errors") else "format_report"
+
+
+def route_after_finalize(state: Mapping[str, Any]) -> str:
+    """Send reports flagged for human review to the approval gate."""
+
+    report = state.get("report") or {}
+    return "approval_gate" if report.get("requires_human_review") else "complete"

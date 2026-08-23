@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.types import Command, interrupt
 
 from app.agents.diagnostic import REPORT_FORMATTING_PROMPT, finalize_report as finalize_from_draft
 from app.agents.evidence import (
@@ -38,8 +39,8 @@ in both cases explain briefly in reason and leave device_id null. Never request 
 For in_scope requests: set device_id exactly as requested; list only the evidence types needed by the question;
 timestamps must be timezone-aware ISO 8601 taken from the question or its context, never invented;
 requesting sensor, alarm, or work_order history requires a complete start_at/end_at window;
-requesting sensor evidence requires at least one metric name from the question (default vibration_mm_s);
-requesting manual evidence requires a short manual_query keyword string.
+include metrics only when requesting sensor evidence (default vibration_mm_s), and manual_query
+only when requesting manual evidence; extra fields for unrequested types are ignored by the program.
 Do not invent measurements, alarms, manuals, or work orders. The plan is not a diagnosis."""
 
 _TOOL_FUNCTIONS = {
@@ -226,3 +227,78 @@ def fail_closed(state: Mapping[str, Any]) -> dict[str, Any]:
 
     errors = "; ".join(state.get("unresolved_errors", []))
     return {"report": None, "error": errors or "diagnosis failed without a specific error"}
+
+
+def approval_gate(state: Mapping[str, Any]) -> Command[Literal["record_rejection", "execute_approved_action"]]:
+    """Pause for a structured human decision before any controlled side effect.
+
+    Everything before ``interrupt()`` is pure computation so the mandatory
+    node restart on resume stays side-effect free. The resume value is a
+    validated :class:`ApprovalDecision`; invalid human input raises instead of
+    silently proceeding.
+    """
+
+    from app.schemas.approval import ApprovalDecision, derive_proposed_action
+
+    raw_report = state.get("report")
+    if not isinstance(raw_report, dict):
+        raise RuntimeError("approval gate reached without a finalized report")
+    proposal = derive_proposed_action(raw_report)
+    proposal_payload = proposal.model_dump(mode="json")
+    risk_summary = {
+        "risk_level": raw_report.get("risk_level"),
+        "requires_human_review": raw_report.get("requires_human_review"),
+        "recommended_actions": raw_report.get("recommended_actions", []),
+    }
+    raw_decision = interrupt({"proposed_action": proposal_payload, "report_summary": risk_summary})
+    decision = ApprovalDecision.model_validate(raw_decision)
+    update: dict[str, Any] = {
+        "proposed_action": proposal_payload,
+        "approval": decision.model_dump(mode="json"),
+    }
+    if decision.decision == "rejected":
+        return Command(update=update, goto="record_rejection")
+    if decision.decision == "modified":
+        revised_report = dict(raw_report)
+        revised_report["recommended_actions"] = list(decision.modified_actions or [])
+        update["report"] = revised_report
+    return Command(update=update, goto="execute_approved_action")
+
+
+def execute_approved_action(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Run the single simulated action; the tool itself is idempotent."""
+
+    from app.tools.mock_actions import execute_maintenance_action
+
+    if state.get("action_audit") is not None:
+        return {}
+    approval = state.get("approval", {})
+    result = execute_maintenance_action(
+        request_id=str(state.get("request_id", "")),
+        device_id=str(state.get("device_id", "")),
+    )
+    audit = {
+        **result,
+        "decision": approval.get("decision"),
+        "decided_by": approval.get("decided_by"),
+        "reason": approval.get("reason"),
+    }
+    return {"action_audit": audit}
+
+
+def record_rejection(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist an explicit rejection record without any side effect."""
+
+    approval = state.get("approval", {})
+    proposal = state.get("proposed_action", {})
+    audit = {
+        "status": "rejected",
+        "action_type": proposal.get("action_type", "schedule_maintenance"),
+        "request_id": state.get("request_id"),
+        "device_id": state.get("device_id"),
+        "ticket_id": None,
+        "decision": approval.get("decision"),
+        "decided_by": approval.get("decided_by"),
+        "reason": approval.get("reason"),
+    }
+    return {"action_audit": audit}

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import re
 
 import pytest
 
@@ -27,7 +29,7 @@ def _report() -> DiagnosisReport:
     )
 
 
-def test_cli_prints_exactly_one_report_json_to_stdout_and_passes_structured_method(monkeypatch, capsys) -> None:
+def test_cli_prints_exactly_one_outcome_json_to_stdout_and_passes_structured_method(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         cli,
         "get_settings",
@@ -42,14 +44,16 @@ def test_cli_prints_exactly_one_report_json_to_stdout_and_passes_structured_meth
     monkeypatch.setattr(cli, "create_chat_model", lambda settings: object())
     received: dict[str, object] = {}
 
-    def build_stub(model, *, structured_output_method):
+    def build_stub(model, *, structured_output_method, checkpointer=None):
         from types import SimpleNamespace
 
         received["method"] = structured_output_method
+        assert checkpointer is not None, "the CLI must always run with a checkpointer"
         return SimpleNamespace(
             invoke=lambda state, config: {
                 "report": _report().model_dump(mode="json"),
                 "error": "",
+                "configurable_thread_id": config["configurable"]["thread_id"],
             }
         )
 
@@ -60,7 +64,12 @@ def test_cli_prints_exactly_one_report_json_to_stdout_and_passes_structured_meth
 
     assert exit_code == 0
     assert captured.err == ""
-    assert json.loads(captured.out) == _report().model_dump(mode="json")
+    expected = {
+        "report": _report().model_dump(mode="json"),
+        "approval": None,
+        "action_audit": None,
+    }
+    assert json.loads(captured.out) == expected
     assert captured.out.count("\n") == 1
     assert received == {"method": "function_calling"}
 
@@ -73,7 +82,7 @@ def test_cli_fail_closed_branch_prints_redacted_error_to_stderr(monkeypatch, cap
     monkeypatch.setattr(
         cli,
         "build_diagnosis_graph",
-        lambda model, *, structured_output_method: SimpleNamespace(
+        lambda model, *, structured_output_method, checkpointer=None: SimpleNamespace(
             invoke=lambda state, config: {
                 "report": None,
                 "error": "query_sensor_history: Authorization: Bearer top-secret",
@@ -88,6 +97,77 @@ def test_cli_fail_closed_branch_prints_redacted_error_to_stderr(monkeypatch, cap
     assert captured.out == ""
     assert "top-secret" not in captured.err
     assert json.loads(captured.err)["error"].count("[REDACTED") >= 1
+
+
+def _stderr_error(captured) -> dict:
+    """Extract the final redacted error object from mixed stderr output."""
+
+    matches = re.findall(r'\{"error".*?\}', captured.err)
+    assert matches, captured.err
+    return json.loads(matches[-1])
+
+
+def test_cli_approval_flow_approves_with_audit(monkeypatch, capsys) -> None:
+    from types import SimpleNamespace
+
+    report_payload = _report().model_dump(mode="json")
+    calls: list[object] = []
+
+    def build_stub(model, *, structured_output_method, checkpointer=None):
+        graph = SimpleNamespace()
+        graph.invoke = lambda command, config: calls.append(command) or (
+            {
+                "__interrupt__": [SimpleNamespace(value={"proposed_action": {"action_type": "schedule_maintenance"}})],
+            }
+            if len(calls) == 1
+            else {
+                "report": report_payload,
+                "approval": {
+                    "decision": "approved",
+                    "decided_by": "duty-officer",
+                    "modified_actions": None,
+                },
+                "action_audit": {"status": "executed", "ticket_id": "MNT-request-001"},
+            }
+        )
+
+        return graph
+
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(_env_file=None, tracing_enabled=False))
+    monkeypatch.setattr(cli, "create_chat_model", lambda settings: object())
+    monkeypatch.setattr(cli, "build_diagnosis_graph", build_stub)
+    monkeypatch.setattr("sys.stdin", io.StringIO("approve\nduty-officer\n现场已确认\n"))
+
+    exit_code = cli.main(["--question", "研判振动", "--request-id", "request-001"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    outcome = json.loads(captured.out)
+    assert outcome["approval"]["decision"] == "approved"
+    assert outcome["action_audit"]["ticket_id"] == "MNT-request-001"
+
+
+def test_cli_eof_during_approval_fails_without_fabricating_a_decision(monkeypatch, capsys) -> None:
+    from types import SimpleNamespace
+
+    def build_stub(model, *, structured_output_method, checkpointer=None):
+        return SimpleNamespace(
+            invoke=lambda command, config: {
+                "__interrupt__": [SimpleNamespace(value={"proposed_action": {"action_type": "schedule_maintenance"}})]
+            }
+        )
+
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(_env_file=None, tracing_enabled=False))
+    monkeypatch.setattr(cli, "create_chat_model", lambda settings: object())
+    monkeypatch.setattr(cli, "build_diagnosis_graph", build_stub)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+
+    exit_code = cli.main(["--question", "研判振动", "--request-id", "request-001"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "no human input" in _stderr_error(captured)["error"]
+    assert '"report"' not in captured.out
 
 
 def test_cli_error_is_nonzero_and_redacts_stderr(monkeypatch, capsys) -> None:

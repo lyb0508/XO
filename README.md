@@ -50,7 +50,7 @@ python -m pytest
 - `app/config/`：集中式 `Settings`，负责 provider、模型、限额和 Trace 配置。
 - `app/models/`：Ollama/DeepSeek 模型工厂，不在构造时发起网络调用。
 - `app/tools/`：五个固定模拟数据的只读工具。
-- `app/graphs/`：第二阶段 LangGraph 编排：规划节点、并行 fan-out、Reducer 合并、条件路由与 fail-closed 分支。
+- `app/graphs/`：LangGraph 编排：规划节点、并行 fan-out、Reducer 合并、条件路由、Checkpoint/Interrupt 人工审批与 fail-closed 分支。
 - `app/agents/`：证据注册表转换边界、振动门控与报告格式化（两阶段 Agent 入口保留）。
 - `app/schemas/`：工具输入、`QueryPlan` 与 `DiagnosisReport` 输出契约。
 - `app/observability/`：显式开启才创建的 LangSmith client、allowlist 和脱敏。
@@ -58,5 +58,6 @@ python -m pytest
 - `tests/`：离线 fake model、契约、图流程、限额、来源闭环和脱敏测试。
 - [`docs/phase1-langchain-agent.md`](docs/phase1-langchain-agent.md)：阶段学习材料、真实数据流、失败复盘和练习。
 - [`docs/phase2-langgraph-orchestration.md`](docs/phase2-langgraph-orchestration.md)：LangGraph 编排设计、并行/Reducer 语义与 live 复盘。
+- [`docs/phase3-persistence-approval.md`](docs/phase3-persistence-approval.md)：Checkpoint/Interrupt 审批流、幂等语义与线程隔离。
 
-2026-08-23 验证记录包括 Python 3.13.12、`pip check`、`compileall app tests`，以及离线 126 项测试（另有 2 项 live 测试默认跳过）连续三次通过，稳态耗时约 `2.3s`；阶段 2 另有本地 Ollama live smoke 通过记录。完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。
+2026-08-23 验证记录包括 Python 3.13.12、`pip check`、`compileall app tests`，以及离线 140 项测试（另有 2 项 live 测试默认跳过）连续三次通过，稳态耗时约 `2.3–2.5s`；阶段 2/3 各有本地 Ollama live smoke 通过记录（含一次完整人工审批链路）。完整证据和未验证边界见阶段文档。`pylock.toml` 由 `pip lock` 生成，该命令仍属 experimental，不能把锁文件生成等同于部署验证。

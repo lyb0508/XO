@@ -119,6 +119,56 @@ def scripted_tool_call(name: str, args: dict[str, Any], call_id: str) -> AIMessa
     return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id}])
 
 
+class _ScriptedBound:
+    """Schema-bound invokable returning scripted responses in order."""
+
+    def __init__(self, responses: list[Any]) -> None:
+        self._responses = responses
+        self.calls = 0
+
+    def invoke(self, messages: list[Any], config: dict[str, Any] | None = None) -> Any:
+        if not self._responses:
+            raise AssertionError("no scripted response configured")
+        index = min(self.calls, len(self._responses) - 1)
+        self.calls += 1
+        return self._responses[index]
+
+
+class GraphFakeChatModel(BaseChatModel):
+    """Deterministic offline stand-in exposing two schema-bound invokables.
+
+    The raw model raises if called directly: the graph must only ever reach the
+    model through its two structured wrappers.
+    """
+
+    plan_responses: list[Any]
+    draft_responses: list[Any]
+    planner_calls: int = 0
+    formatter_calls: int = 0
+
+    _planner: _ScriptedBound | None = PrivateAttr(default=None)
+    _formatter: _ScriptedBound | None = PrivateAttr(default=None)
+
+    @property
+    def _llm_type(self) -> str:
+        return "phase-three-graph-fake"
+
+    def _generate(self, messages: list[BaseMessage], **kwargs: Any) -> ChatResult:
+        raise AssertionError("the diagnosis graph must never call the raw model directly")
+
+    def with_structured_output(self, schema: object, **kwargs: Any) -> "_ScriptedBound":
+        from app.schemas.diagnostics import DiagnosisDraft
+        from app.schemas.query_plan import QueryPlan
+
+        if schema is QueryPlan:
+            self._planner = _ScriptedBound(list(self.plan_responses))
+            return self._planner  # type: ignore[return-value]
+        if schema is DiagnosisDraft:
+            self._formatter = _ScriptedBound(list(self.draft_responses))
+            return self._formatter  # type: ignore[return-value]
+        raise AssertionError(f"unexpected structured schema {schema!r}")
+
+
 @pytest.fixture
 def utc_window() -> tuple[datetime, datetime]:
     return (

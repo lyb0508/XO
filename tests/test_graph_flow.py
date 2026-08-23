@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol
+from typing import Any
 
 import pytest
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from pydantic import PrivateAttr
+
+from conftest import GraphFakeChatModel
 
 from app.graphs.builder import GRAPH_RECURSION_LIMIT, build_diagnosis_graph
-from app.schemas.diagnostics import DiagnosisDraft
 from app.schemas.query_plan import QueryPlan
 
 WINDOW = {"start_at": "2026-08-22T00:00:00+00:00", "end_at": "2026-08-22T02:00:00+00:00"}
@@ -52,54 +49,6 @@ INSUFFICIENT_DRAFT = {
     "requires_human_review": False,
     "limitations": ["未采集任何设备证据。"],
 }
-
-
-class _Bound(Protocol):
-    calls: int
-
-
-class _FakeBound:
-    """Schema-bound invokable returning scripted responses in order."""
-
-    def __init__(self, responses: list[Any]) -> None:
-        self._responses = responses
-        self.calls = 0
-        self.inputs: list[list[BaseMessage]] = []
-
-    def invoke(self, messages: list[Any], config: dict[str, Any] | None = None) -> Any:
-        assert config is None or "tags" not in config or isinstance(config["tags"], list)
-        if not self._responses:
-            raise AssertionError("no scripted response configured")
-        index = min(self.calls, len(self._responses) - 1)
-        self.calls += 1
-        self.inputs.append(list(messages))
-        return self._responses[index]
-
-
-class GraphFakeChatModel(BaseChatModel):
-    """Deterministic offline stand-in exposing two schema-bound invokables."""
-
-    plan_responses: list[Any]
-    draft_responses: list[Any]
-    _planner: _FakeBound | None = PrivateAttr(default=None)
-    _formatter: _FakeBound | None = PrivateAttr(default=None)
-
-    @property
-    def _llm_type(self) -> str:
-        return "phase-two-graph-fake"
-
-    def _generate(self, messages: list[BaseMessage], **kwargs: Any) -> ChatResult:
-        raise AssertionError("the diagnosis graph must never call the raw model directly")
-
-    def with_structured_output(self, schema: object, **kwargs: Any) -> _FakeBound:
-        target_schema = DiagnosisDraft.__name__ if isinstance(schema, type) else ""
-        if schema is QueryPlan:
-            self._planner = _FakeBound(list(self.plan_responses))
-            return self._planner  # type: ignore[return-value]
-        if target_schema == "DiagnosisDraft":
-            self._formatter = _FakeBound(list(self.draft_responses))
-            return self._formatter  # type: ignore[return-value]
-        raise AssertionError(f"unexpected structured schema {schema!r}")
 
 
 def _sufficient_draft(request_id: str = "request-graph-001") -> dict[str, Any]:

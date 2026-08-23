@@ -1,4 +1,4 @@
-"""Compose the phase-two diagnosis graph.
+"""Compose the phase-two/three diagnosis graph.
 
 Topology (one super-step unless noted):
 
@@ -11,17 +11,26 @@ Topology (one super-step unless noted):
                           +-> format_report (out-of-scope shortcut)
     join_registry -> fail_closed            when errors/conflicts remain
                   -> format_report          otherwise
-    format_report -> finalize_report -> END
-    fail_closed   -> END
+    format_report -> finalize_report
+    finalize_report -> complete                when no human review is required
+                    -> approval_gate           otherwise (phase three, needs checkpointer)
+    approval_gate -> execute_approved_action   approved / modified decisions
+                  -> record_rejection          rejected decision
 
 Model calls are bounded by construction: one planner call, one formatter
-call. Tool calls are bounded by the five-node fan-out. A recursion limit is
-applied at invoke time as a final backstop.
+call. Tool calls are bounded by the five-node fan-out. The only controlled
+side effect runs in ``execute_approved_action`` after a validated human
+decision. A recursion limit is applied at invoke time as a final backstop.
+
+The approval branch is wired only when a checkpointer is supplied: without
+persistence there is no way to resume an interrupt, so the graph refuses to
+offer a path that could require one.
 """
 
 from __future__ import annotations
 
 from langchain_core.language_models import BaseChatModel
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.diagnostic import Invokable
@@ -37,8 +46,13 @@ def build_diagnosis_graph(
     model: BaseChatModel,
     *,
     structured_output_method: str = "json_schema",
+    checkpointer: BaseCheckpointSaver | None = None,
 ):
-    """Compile the diagnosis graph around schema-bound planner/formatter calls."""
+    """Compile the diagnosis graph around schema-bound planner/formatter calls.
+
+    Passing a checkpointer additionally wires the human-approval branch; the
+    caller must then always provide ``configurable.thread_id``.
+    """
 
     planner = _schema_bound(model, QueryPlan, structured_output_method)
     formatter = _schema_bound(model, DiagnosisDraft, structured_output_method)
@@ -52,6 +66,10 @@ def build_diagnosis_graph(
     builder.add_node("format_report", nodes.make_format_report(formatter))
     builder.add_node("finalize_report", nodes.finalize_report)
     builder.add_node("fail_closed", nodes.fail_closed)
+    builder.add_node("approval_gate", nodes.approval_gate)
+    builder.add_node("execute_approved_action", nodes.execute_approved_action)
+    builder.add_node("record_rejection", nodes.record_rejection)
+    builder.add_node("complete", lambda state: {})
 
     builder.add_edge(START, "plan_queries")
     builder.add_conditional_edges(
@@ -68,9 +86,21 @@ def build_diagnosis_graph(
         {"fail_closed": "fail_closed", "format_report": "format_report"},
     )
     builder.add_edge("format_report", "finalize_report")
-    builder.add_edge("finalize_report", END)
+    if checkpointer is None:
+        builder.add_edge("finalize_report", "complete")
+        builder.add_edge("complete", END)
+    else:
+        builder.add_conditional_edges(
+            "finalize_report",
+            routing.route_after_finalize,
+            {"approval_gate": "approval_gate", "complete": "complete"},
+        )
+        builder.add_edge("execute_approved_action", "complete")
+        builder.add_edge("record_rejection", "complete")
+        builder.add_edge("complete", END)
     builder.add_edge("fail_closed", END)
-    return builder.compile()
+    compile_kwargs = {} if checkpointer is None else {"checkpointer": checkpointer}
+    return builder.compile(**compile_kwargs)
 
 
 def _tool_name_for(node_name: str) -> str:
